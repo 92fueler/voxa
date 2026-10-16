@@ -1,10 +1,12 @@
 # Voxa: personal voice learning companion
 
-Status: proposed design; implementation has not started.
+Status: proposed architecture with the initial local voice prototype implemented and accepted by the user as the current MVP. The temporary-credential handshake is verified, and the user has reported spoken responses. Detailed live acceptance checks remain tracked in PLANS.md. Storage and learning modes are not implemented.
 
 Research date: October 16, 2026.
 
-This document describes a single-user MVP. API capabilities and published rates are sourced below. Product behavior, retention periods, latency targets, and component choices are proposals. No voice sessions, latency benchmarks, model-quality evaluations, or end-to-end cost measurements have been run.
+Documentation review: October 16, 2026. See the review entry in [PLANS.md](PLANS.md) for corrections and verification limits.
+
+This document describes a single-user MVP. API capabilities and published rates are sourced below. Product behavior, retention periods, latency targets, and component choices are proposals. User-reported voice use is recorded in PLANS.md; no controlled latency benchmarks, model-quality evaluations, or end-to-end cost measurements have been run.
 
 ## 1. Product goal
 
@@ -71,8 +73,8 @@ Use the Realtime SDK as a possible session-management wrapper; retain explicit a
 2. The backend loads preferences and a small set of relevant learning notes and issues session credentials.
 3. The client requests microphone access and establishes WebRTC. Show listening only after the connection is ready.
 4. The user and Voxa converse. Transcript collection and persistence proceed independently of spoken response generation.
-5. On end, finalize received transcript items and usage, then close the media connection and release the microphone.
-6. Run post-session review asynchronously. Show pending, complete, or failed review status; a failed review must not discard the session.
+5. On end, stop microphone capture and playback immediately, cancel active generation, and allow only a bounded drain of final events before closing the connection. Missing final transcript or usage data remains explicitly incomplete; saving must not delay microphone release.
+6. For saved sessions, review an identified transcript revision asynchronously. Show pending, complete, or failed review status; a failed review must not discard the session. Late finalized events create a new revision and invalidate stale reviews rather than silently changing their evidence.
 7. On a future session, load selected context rather than the entire conversation archive.
 
 Distinguish muted, disconnected, and ended states. Muting the microphone is not the same as ending the session. On network failure, stop claiming that Voxa is listening and offer reconnection. A replacement session can receive a compact summary and recent finalized turns, with an explicit indication that continuity may be incomplete.
@@ -97,6 +99,8 @@ Initial product targets for ordinary conversation are a median last-word-to-repl
 - Provide a manual “done speaking” control for pauses that automatic detection handles poorly.
 - Allow interruptions and keep replies short enough that the user remains an active participant.
 
+The manual fallback is an explicit interaction mode, not an extra button layered over automatic replies. It must gate automatic response creation and trigger one response only when the user indicates completion. Test switching between automatic and manual policies without duplicate replies. Prompting the assistant to wait is not a reliable substitute for response gating.
+
 Semantic VAD estimates completion using the meaning of speech; silence-based VAD uses pauses. Lower eagerness allows more time to speak. Neither can guarantee that a thinking pause means the user is finished. Test with the user's actual speech patterns. [VAD documentation](https://developers.openai.com/api/docs/guides/realtime-vad)
 
 Keep comprehensive grading, memory extraction, and unnecessary database reads outside the spoken response path. Preload relevant learning context at session start. Allow a slower, acknowledged check when technical correctness requires it. Higher reasoning effort can increase latency and output token usage. [Realtime model documentation](https://developers.openai.com/api/docs/models/gpt-realtime-2.1)
@@ -104,6 +108,8 @@ Keep comprehensive grading, memory extraction, and unnecessary database reads ou
 ## 6. Model choice and cost
 
 Use the full Realtime model as a quality reference, then compare Mini on identical tasks. Mini is the proposed everyday default only if it meets requirements for misconception detection, bilingual understanding, and coaching behavior. A cheaper model that confidently validates incorrect explanations would undermine the product.
+
+Run a small model-quality comparison after the voice foundation and first two learning modes, before building persistent learning memory. Repeat a broader comparison later for long sessions. A poor conversational foundation should change the design early.
 
 Published audio rates, USD per million tokens:
 
@@ -133,17 +139,17 @@ Persistent storage is not required for an isolated voice conversation. It is use
 Proposed defaults:
 
 - **Finalized transcript turns:** 30 days, with explicit pinning for sessions worth keeping.
-- **Session summaries and learning notes:** until removed or superseded.
+- **Session summaries and learning notes:** until removed or superseded; retain only compact observations and minimal provenance after source-transcript expiry.
 - **Usage and timing metadata:** 90 days.
-- **Raw audio:** off by default; retain only explicitly selected clips for replay or pronunciation work.
+- **Raw audio:** no recording feature in this MVP. Explicitly selected practice clips are a possible later feature.
 
 Transcripts support wording and conceptual feedback. A transcript cannot preserve pronunciation or intonation evidence; those features require audio and separate quality evaluation. Do not present pronunciation scores as calibrated measurements.
 
 ### Minimal conceptual records
 
-- **Session:** ID, mode, topic, start/end, model, prompt version, connection outcome, and review status.
-- **Turn:** provider item ID, speaker, ordering relationship, finalized text, timestamps, and interruption/incomplete markers.
-- **Review:** summary, strengths, possible misconceptions, useful English expressions, suggested exercises, and supporting turn IDs.
+- **Session:** application ID, provider-session identities, mode, topic, start/end, model, prompt version, transcript revision, connection outcome, and review status.
+- **Turn:** application ID, provider session/item identity, speaker, ordering relationship, finalized text, timestamps, and interruption/incomplete markers.
+- **Review:** source transcript revision, summary, strengths, possible misconceptions, useful English expressions, suggested exercises, and supporting turn IDs.
 - **Learning note:** topic, observation, source session/turn IDs, tentative/resolved status, last-reviewed date, and suggested next practice.
 - **Usage:** response ID, token categories and cache details, separate transcription/evaluation usage, estimated cost, and accounting completeness.
 
@@ -153,11 +159,15 @@ Treat a learning note as evidence-backed guidance, not an unquestionable fact ab
 
 Save finalized turns incrementally; do not wait until session end to save everything. Match events by item ID and preserve conversation ordering rather than assuming arrival order. Deduplicate retries. Partial transcript text is a display aid until finalized, and incomplete sessions remain reviewable with that limitation marked.
 
-With interruptions, preserve what was actually played and mark interrupted output. WebRTC automatically truncates unplayed assistant audio from the live conversation, so the archive must reconcile its transcript rather than treating all generated output as heard. [Interruption handling](https://developers.openai.com/api/docs/guides/realtime-conversations)
+Input transcription is asynchronous and is an approximation of the audio, not exactly what the speech model understood. Preserve that distinction in review and memory. Use a bounded finalization deadline; a late event must not be attached to the wrong session or quietly alter a completed review. [Input transcription reference](https://developers.openai.com/api/reference/resources/realtime/subresources/client_secrets/methods/create)
+
+Mark interrupted assistant output as incomplete. WebRTC truncates unplayed audio in live context, but the API does not supply a precisely aligned truncated transcript. Do not promise an exact record of words heard. Conservatively exclude uncertain assistant text from claims about delivered teaching, and retain an interruption marker instead. [Interruption handling](https://developers.openai.com/api/docs/guides/realtime-conversations)
 
 For the initial client-forwarded persistence design, buffer unsaved finalized events for retry and expose unsaved state. Browser closure can still lose unsent data. If this proves unacceptable, use server-side event capture; do not claim crash-proof storage from client forwarding alone.
 
 Run review only on a clearly identified transcript snapshot. Store review status and make retries idempotent. A simple backend task is enough initially; a separate queue service is not required by this design.
+
+Persist pending review work so a backend restart can retry it. Before committing a result, check the source revision and whether the session still exists. Deletion or expiry must invalidate affected in-flight jobs so their completion cannot recreate removed content. Treat transcript text as evidence, not as instructions to the evaluator.
 
 ## 8. Caching and context management
 
@@ -173,8 +183,8 @@ Proposed context policy:
 
 1. At session start, select preferences, the current topic summary, and a small number of relevant learning notes.
 2. Retain recent dialogue for natural follow-ups.
-3. Summarize at topic boundaries or when the token budget requires it.
-4. Preserve useful older information before discarding old context.
+3. At a topic boundary or before the context threshold, build a compact summary from finalized, eligible turns.
+4. Verify the summary and recent turns are available before intentionally replacing old context. Automatic truncation alone does not summarize discarded content. If it occurs first, mark the gap and ask for clarification instead of inventing lost detail.
 5. Keep the full retained archive outside the live model context.
 
 Experiment with a 16k post-instruction token budget and retention ratio 0.8, compared with 8k and 32k. These values are starting hypotheses, not requirements. Test forgetting and feedback quality alongside cost. The API exposes a custom conversation-token limit and retention-ratio truncation. [Configuration reference](https://developers.openai.com/api/reference/resources/realtime/subresources/client_secrets/methods/create)
@@ -183,9 +193,13 @@ For initial memory selection, use explicit topic tags and SQLite search. Add emb
 
 ## 9. Privacy and deletion
 
-Offer a session without persistent transcript storage or learning updates. Explain that speech still goes to the API provider. Avoid logging credentials or raw audio in ordinary diagnostic logs.
+Offer a no-save session with no durable transcript, summary, review, or learning updates, and no prior personal learning notes loaded. Live context can remain in memory until the session ends. Content-free operational metadata such as model, duration, and token counts may be retained; topic names and message content are excluded. Explain that speech still goes to the API provider. Avoid logging credentials or raw audio in ordinary diagnostic logs.
+
+Distinguish automatic transcript expiry from an explicit “delete session and learning” action. On 30-day transcript expiry, remove turn text and detailed review excerpts; a compact summary or learning note may remain under the separately stated policy, with source IDs marked unavailable. Do not preserve verbatim transcript copies in derived records to evade expiry. The review UI must explain that the original evidence is no longer available.
 
 Deleting a session should remove its transcript, retained clips, review, and dependent learning notes, or recompute notes that have independent supporting evidence. Pinned sessions need an explicit deletion path too.
+
+If deleted context has already been supplied to a running voice session, close that session and start fresh on the user's next request before claiming the companion has forgotten it. Cancel pending writes/reviews or reject their stale completion. Deletion also needs to handle buffered retry events.
 
 Application retention and provider retention are separate. OpenAI states that API data is not used for training by default. Standard abuse-monitoring logs may contain content and are generally retained for up to 30 days, with documented exceptions. Special retention controls require eligibility and approval; this MVP must not claim zero provider retention. [Data controls](https://developers.openai.com/api/docs/guides/your-data)
 
@@ -207,7 +221,7 @@ Use identical tasks and prompts when comparing models. Keep a small human-review
 ## 11. Open decisions
 
 - Preferred session length and monthly testing budget.
-- Whether teach-back or English expression should be the first mode evaluated.
+- Teach-back is the proposed first mode; English expression follows for the early comparison. The user can change this order before implementation.
 - Whether the proposed 30-day transcript retention is useful, or sessions should default to no persistence.
 - Whether phone foreground use is sufficient for the MVP, or locked-screen use is a launch requirement.
 - How much technical checking should happen during conversation versus after the session.
