@@ -8,3 +8,9 @@ coverage/
 data/
 *.sqlite*
 *.log
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.egg-info/

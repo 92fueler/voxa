@@ -105,3 +105,9 @@ Latency measurement or explicitly labeled proxy:
 Usage completeness and estimated cost:
 Decision / follow-up:
 ```
+
+## Voice identity and relevance regression (pending live check)
+
+Use synthetic English and Mandarin questions: “What is your name?”, “你叫什么名字？”, then separately “你知道些什么？”. Expected: identify as Voxa for the name questions; describe capabilities only for the capabilities question. Repeat with a speaker change and an interruption. A capabilities answer to a name question is a relevance failure even if the saved transcript correctly recognizes the question.
+
+The Realtime model consumes audio directly; input transcription is a separate ASR result and cannot prove how the speech model interpreted the audio. The reported name-question incident had valid archived item ordering, so no simple viewer reordering defect was found. Audio is not retained, and the exact historical cause remains unproven. Do not claim that a prompt edit or a text-only test has fixed that spoken failure. No audio experiment was performed for this report.

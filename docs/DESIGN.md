@@ -1,6 +1,6 @@
 # Voxa: personal voice learning companion
 
-Status: proposed architecture with the initial local voice prototype implemented and accepted by the user as the current MVP. The temporary-credential handshake is verified, and the user has reported spoken responses. Detailed live acceptance checks remain tracked in PLANS.md. Storage and learning modes are not implemented.
+Status: the local voice MVP is implemented with optional transcript persistence and a saved-conversation viewer. Worker storage, normalization, and failure isolation have offline checks; real sideband/transcription acceptance remains pending. The user accepted the original voice MVP. Continuity summaries and automatic recent-history startup context are implemented, with spoken acceptance pending. Learning modes and automatic rollover remain planned. See PLANS.md for verification boundaries.
 
 Research date: October 16, 2026.
 
@@ -51,21 +51,30 @@ These are distinct architectures with different billing and state behavior. They
 flowchart LR
     User[User: microphone and speaker] <--> Client[Browser client]
     Client <-->|WebRTC audio| Realtime[OpenAI Realtime]
-    Client <-->|Session setup and finalized events| Backend[Small application backend]
-    Backend --> Store[(SQLite)]
+    Client <-->|Session setup and save status| Backend[Small application backend]
+    Realtime -->|Sideband transcript events| Backend
+    Backend -->|Bounded background save queue| Store[(SQLite)]
     Backend --> Review[Post-session text evaluation]
     Review --> Store
     Store -->|Selected learning context| Backend
 ```
 
 - **React/TypeScript client:** microphone controls, playback, session state, mode, captions, and review UI.
-- **Node/TypeScript backend:** permanent API key, temporary session credentials, persistence, context selection, usage accounting, and review execution.
+- **Python/FastAPI backend:** permanent API key, temporary session credentials, persistence, context selection, usage accounting, and review execution.
 - **SQLite:** sufficient for one user's sessions, transcript turns, learning notes, and metadata. No vector database or distributed cache is proposed initially.
 - **Post-session evaluator:** a separate text-model request for structured feedback and proposed learning-note updates. Choose its model through evaluation rather than assuming a particular model is necessary.
 
-The browser sends audio directly to OpenAI. The backend need not proxy the audio stream. Permanent API credentials stay on the server; the browser receives short-lived credentials. A server sideband connection can later capture events and execute private tools without routing primary audio through the backend. Sources: [WebRTC](https://developers.openai.com/api/docs/guides/voice-webrtc), [server-side controls](https://developers.openai.com/api/docs/guides/voice-server-controls).
+The browser sends audio directly to OpenAI. The backend need not proxy the audio stream. Permanent API credentials stay on the server. Saved sessions use a one-use browser setup handle: the backend exchanges SDP with its own temporary credential and obtains the call ID directly from the provider response before attaching the sideband observer. This avoids accepting an arbitrary client-selected call ID. Sessions with saving off use a temporary browser credential when there is no history; when history is present they use a transient backend setup handle without a transcript observer or content writes. Both use direct WebRTC for ongoing audio. The sideband observes the same Realtime session, not a second AI conversation or a separate Codex chat. Sources: [WebRTC](https://developers.openai.com/api/docs/guides/voice-webrtc), [server-side controls](https://developers.openai.com/api/docs/guides/voice-server-controls?voice-api=realtime).
+
+Voice and persistence are separate asynchronous tasks within the application. Neither database acknowledgments nor transcript finalization should gate microphone transport, playback, or response generation. The implementation uses a dedicated Python worker thread for the synchronous standard-library SQLite API, keeping database locks off the API/event loop. Calling a blocking database operation from an async function does not make it nonblocking.
 
 Use the Realtime SDK as a possible session-management wrapper; retain explicit application ownership of persistence and learning behavior. No additional orchestration framework is needed for the proposed MVP.
+
+### Python and provider boundaries (October 17 migration)
+
+The repository groups web source/npm tooling under `frontend/` and Python source/uv tooling/environment/data under `backend/`, with root `Makefile` commands. The implementation separates the FastAPI HTTP contract, application services, SQLite repository, model-provider adapters and local-app connectors. VoiceProvider and SummaryProvider are independent ports; OpenAI is the initial concrete implementation. Provider-specific credential formats, URLs, request schemas, sideband connections and transcript wire normalization stay in that adapter. Browser protocol details live in a matching transport adapter. A provider with a different audio transport requires an additional browser adapter; changing an environment variable alone is insufficient. No orchestration framework, extra service, vector database or distributed queue is added.
+
+BrainShuffle remains an independent application. An optional loopback HTTP connector reads its actual `/api/problems/{id}` schema, and a versioned Voxa export prepares the return-data boundary. No database sharing, automatic summary upload or grading is introduced. The existing UI behavior and schema-v4 archive remain the migration baseline. See [PYTHON_BACKEND.md](PYTHON_BACKEND.md) for the concrete parity contract and extension workflow.
 
 ## 4. Session lifecycle
 
@@ -136,6 +145,10 @@ Compare 5-, 15-, and 45-minute sessions, cost per useful learning session, and c
 
 Persistent storage is not required for an isolated voice conversation. It is useful for session review, next-day continuity, debugging feedback, and tracking what to practice.
 
+Current increment: the UI always saves transcripts automatically at the user's request; the redundant saving checkbox was removed. SQLite stores transcript turns under `data/`, with no raw-audio recording. The viewer supports concise titles with dates, refresh, per-row deletion with confirmation, and manual categories. Compact category headings have contextual rename/remove menus; + Category opens a small creation form. Dense history rows place titles and shortened dates together when space permits. The voice area contains controls and actionable status only; storage, memory and API usage details live in a collapsed footer section. One category groups related conversations in history; removing a category preserves its conversations. Category changes do not alter transcript revisions or summary evidence. Generic capture diagnostics are not displayed in the transcript viewer. A compact Summary paragraph reuses whole points from the current saved summary above the individual turns; diagnostic metadata remains internal and actual saving errors remain actionable. Expired transcript content is removed on history access after 30 days. Pinning, learning notes, and automatic model-session rollover are still proposals below; no-save sessions perform no conversation-content writes.
+
+Deliver basic transcript saving before automatic learning-memory extraction. The archive preserves what was captured; the model knows past content only when the application explicitly supplies selected history or retrieval results. Saving turns does not train the model, automatically restore a new provider session, or require a learning-quality evaluator.
+
 Proposed defaults:
 
 - **Finalized transcript turns:** 30 days, with explicit pinning for sessions worth keeping.
@@ -163,9 +176,31 @@ Input transcription is asynchronous and is an approximation of the audio, not ex
 
 Mark interrupted assistant output as incomplete. WebRTC truncates unplayed audio in live context, but the API does not supply a precisely aligned truncated transcript. Do not promise an exact record of words heard. Conservatively exclude uncertain assistant text from claims about delivered teaching, and retain an interruption marker instead. [Interruption handling](https://developers.openai.com/api/docs/guides/realtime-conversations)
 
-For the initial client-forwarded persistence design, buffer unsaved finalized events for retry and expose unsaved state. Browser closure can still lose unsent data. If this proves unacceptable, use server-side event capture; do not claim crash-proof storage from client forwarding alone.
+### Capture and background saving
+
+Prefer backend sideband capture for long conversations and walking use, reducing reliance on browser event forwarding. Associate the provider call with a server-issued application conversation before attaching. Keep the permanent key on the backend and verify ownership rather than accepting arbitrary client-supplied call IDs. The documented Realtime WebRTC flow exposes the call ID through the SDP response's `Location` header; verify registration and attachment with the actual browser when implementing. Attach early, and mark an attachment gap as incomplete rather than assuming past events will be replayed. A sideband does not keep the primary audio connection alive when the browser or network disconnects. [Realtime sideband connection](https://developers.openai.com/api/docs/guides/voice-server-controls?voice-api=realtime)
+
+Use one owner for durable transcript writes. The browser may observe the same events for captions/status; it must not independently append duplicate turns. Client-forwarded capture remains a possible smaller fallback, with browser closure and unsent-event loss explicitly documented. Do not switch event owners silently during failures.
+
+The proposed save flow is:
+
+1. Receive transcript events and normalize speaker, item identity, ordering, finalization, and interruption state. Enable input transcription for saved sessions; do not route live replies through transcription. Transcription has separate usage charges.
+2. Enqueue finalized turns or later revisions with a key containing application conversation, provider session, and item identity. Event callbacks do minimal work and never await a database commit before voice can proceed.
+3. A background writer commits small transactions to SQLite and acknowledges saved revisions. Retry transient failures with bounded backoff; duplicate delivery must update the same record rather than append a second turn. Reject stale revisions and writes for deleted conversations.
+4. Expose saving, saved, delayed, and incomplete status independently of voice connection state. Record bounded, sanitized capture reason codes and show saved-turn counts. Expected idle cancellation and an empty-buffer error correlated to our final End commit are cleanup outcomes; do not flag them as transcript loss. Unexpected provider errors and missing final text/order remain warnings. Preserve older unknown flags rather than guessing the cause. Sideband or database failure must not close an otherwise healthy voice session. Bound the queue by count/bytes and retry time; if limits are reached, mark a save gap and stop accepting additional content for persistence until recovery instead of growing memory without limit or silently claiming success.
+5. On End, release microphone and playback immediately. A saved conversation remains alive independently of its voice state: show finalizing, accept late observer events for up to 12 seconds, and close the remaining client transport by 15 seconds. If input was still active, make a best-effort final input commit without requesting another model response. A completed empty ASR result is distinct from a missing final event; it can mean no speech was recognized, so it does not by itself create a pending-finalization warning. Keep placeholder records for detected but unfinished input turns, so a missing ASR completion cannot silently look like a complete capture. Finish saving already-received turns independently of transport closure. Late events stay bound to their original provider session, and deferred cleanup must never affect a new session. These deadlines are initial implementation choices, not measured ASR guarantees. Pending in-memory content can be lost on process failure; only committed data is durable. No-save sessions bypass the durable queue and content writes.
+
+Verify this separation with slow/locked/unavailable storage, sideband loss, duplicate/out-of-order events, queue exhaustion, and End during a pending write. Compare spoken-response timing with saving enabled and disabled under an authorized bounded trial; architectural separation is not proof of zero latency impact. Do not claim complete transcripts when events are missing.
+
+Persistence rollout must preserve an already-running conversation: do not refresh the browser, hot-reload its voice controller, or restart its services to install saving while the user is speaking. Enable capture on a fresh session after the current conversation ends. Previously unsaved speech cannot be recovered retroactively.
 
 Run review only on a clearly identified transcript snapshot. Store review status and make retries idempotent. A simple backend task is enough initially; a separate queue service is not required by this design.
+
+The current continuity increment (V25–V27) adds separate consumers of saved turns. After the durable End operation, a claimed SQLite summary job runs one at a time, using a 90-second deadline and at most three attempts. The job summarizes at most six 24,000-byte sections and one merge with `gpt-5.6-terra` (reasoning disabled); source references are validated and partial coverage is labeled. The same response produces a short title in the conversation’s main language, with source turn references and an 80-character cap. Multi-section jobs choose the final title in the existing merge request. Titles are revision-bound metadata in the summary JSON; they never replace transcript text. The background runner automatically queues ended untitled records, including legacy summaries, in batches of up to 100; an exhausted current job is never reset by polling. Listing history does not schedule work. A bounded opening excerpt labels a conversation immediately until its model title is ready; transcript text is unchanged. A new selected source revision invalidates earlier summary results. Summary failures never gate active voice. Summaries currently share their source's 30-day expiry/deletion policy; indefinitely retained learning notes below remain a future policy.
+
+At Start, the backend automatically chooses the three most recent eligible ended conversations from the retained history. Ready summaries and recent finalized excerpts form a round-robin packet under 6,000 UTF-8 bytes. A pending/failed summary uses eligible excerpts without waiting for an LLM call. Each source gets a bounded excerpt before extra points fill the remaining budget; omission notices stay in the packet. The existing single-use five-minute reservation/revision checks protect startup, but no picker/preview UI is needed. Microphone tracks remain muted until the exact inserted context item receives `conversation.item.done`; errors or timeout release media. The injected item is excluded from new archival normalization. Sources cannot be deleted while setup or voice uses them, including sessions with saving off. Saving off now disables new content writes, not history loading, per the user's updated requirement. Permanent learning-memory inference remains a separate future feature. The API supports [inserting text history](https://developers.openai.com/api/reference/resources/realtime/client-events); summary output uses [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses), with application validation of source references.
+
+Broader summarization and context restoration remain separate consumers of saved turns. Do not rewrite the active model context on each database commit. At a new session or deliberate continuation boundary, select a compact summary and recent finalized turns within a token budget, preserving uncertainty and source turn IDs. Earlier details can be retrieved by topic or SQLite text search. Do not inject the entire archive into every response.
 
 Persist pending review work so a backend restart can retry it. Before committing a result, check the source revision and whether the session still exists. Deletion or expiry must invalidate affected in-flight jobs so their completion cannot recreate removed content. Treat transcript text as evidence, not as instructions to the evaluator.
 
@@ -193,7 +228,7 @@ For initial memory selection, use explicit topic tags and SQLite search. Add emb
 
 ## 9. Privacy and deletion
 
-Offer a no-save session with no durable transcript, summary, review, or learning updates, and no prior personal learning notes loaded. Live context can remain in memory until the session ends. Content-free operational metadata such as model, duration, and token counts may be retained; topic names and message content are excluded. Explain that speech still goes to the API provider. Avoid logging credentials or raw audio in ordinary diagnostic logs.
+The internal API supports saving-off sessions with no new durable transcript, summary, review or learning updates; the current UI always saves automatically. Recent archived conversation context still loads automatically; this updated setting is not a fresh-session or memory-off switch. Permanent personal learning notes remain outside the current increment. Live context can remain in memory until the session ends. Content-free operational metadata such as model, duration, and token counts may be retained; topic names and message content are excluded. Explain that speech still goes to the API provider. Avoid logging credentials or raw audio in ordinary diagnostic logs.
 
 Distinguish automatic transcript expiry from an explicit “delete session and learning” action. On 30-day transcript expiry, remove turn text and detailed review excerpts; a compact summary or learning note may remain under the separately stated policy, with source IDs marked unavailable. Do not preserve verbatim transcript copies in derived records to evade expiry. The review UI must explain that the original evidence is no longer available.
 
@@ -225,6 +260,6 @@ Use identical tasks and prompts when comparing models. Keep a small human-review
 - Whether the proposed 30-day transcript retention is useful, or sessions should default to no persistence.
 - Whether phone foreground use is sufficient for the MVP, or locked-screen use is a launch requirement.
 - How much technical checking should happen during conversation versus after the session.
-- Whether client-forwarded event persistence is adequate, or server capture is needed from the first prototype.
+- Whether backend sideband capture meets transcript completeness requirements on the user's actual browser/device; any client-forwarded fallback must expose its loss limits.
 
 These decisions can be resolved before implementing their dependent features. This document does not authorize implementation or paid experiments.

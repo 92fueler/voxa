@@ -4,31 +4,34 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "concurrently --kill-others --names api,web \"npm:dev:server\" \"npm:dev:client\"",
-    "dev:server": "node --env-file-if-exists=.env --import tsx --watch server/index.ts",
+    "dev": "vite --host 127.0.0.1",
+    "dev:all": "concurrently --kill-others --names api,web \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "uv run --directory ../backend --locked voxa",
     "dev:client": "vite --host 127.0.0.1",
-    "build": "npm run typecheck && vite build && tsc -p tsconfig.server.json",
+    "build": "npm run typecheck && vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run lint && npm run typecheck && npm test && npm run build",
+    "lint": "oxlint --deny correctness --react-plugin --deny react/exhaustive-deps src vite.config.ts vitest.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/bodoni-moda": "5.3.0",
     "@fontsource-variable/inter": "5.3.0",
-    "fastify": "5.12.7",
     "react": "19.3.1",
     "react-dom": "19.3.1"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.3",
     "@types/node": "24.19.2",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",
     "concurrently": "10.0.6",
-    "tsx": "4.23.15",
+    "jsdom": "^29.1.1",
+    "oxlint": "^1.88.0",
     "typescript": "7.0.2",
     "vite": "8.3.4",
     "vitest": "5.0.5"

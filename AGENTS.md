@@ -5,8 +5,10 @@
 - Read `README.md`, `docs/DESIGN.md`, and the selected step in `docs/PLANS.md` before work.
 - `docs/DESIGN.md` owns product and architecture intent. `docs/PLANS.md` owns step scope, status, decisions, and verification evidence.
 - The primary product interaction is audio input and spoken output.
-- Runtime: Node.js 22.12+ and npm. Install with `npm ci`, develop with `npm run dev`, and verify with `npm run check` (typecheck, offline tests, production build). See `README.md` for setup and API-key instructions.
+- Runtime: Python 3.12+ managed by uv (3.13 selected locally), plus Node.js 22.13+ and npm for React/Vite. Install both projects with `make install`, develop with `make dev`, and verify with `make check` (browser lint, TypeScript, full Pyrefly checking, Python lint/format, both offline test suites, frontend build and Python package). See `README.md` for setup and API-key instructions.
 - Frontend: `http://127.0.0.1:4317`; backend: `http://127.0.0.1:4318`. Do not use port 5173. Keep both services bound to loopback and report port conflicts instead of taking over another application's port.
+- Backend code lives in `backend/src/`; provider wire/API logic belongs in `providers/`, local-app connectors in `integrations/`. Run one API process: call handles and context reservations are process-local. Do not share BrainShuffle's database or add automatic sync without a defined product flow.
+- Frontend source and npm configuration live in `frontend/`; Python source, uv configuration, `.venv`, `.env` and runtime data live in `backend/`. Keep root-level project orchestration in `Makefile`. Pyrefly must use the backend environment and source roots, not the React `src/`.
 - Keep human documentation in `docs/`; keep `README.md` and this `AGENTS.md` at the root for onboarding and instruction discovery.
 
 ## Scope

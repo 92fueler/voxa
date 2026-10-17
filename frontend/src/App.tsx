@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
-import { initialVoiceState, VoiceSession, type VoiceState } from './voice-session';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { initialVoiceState, VoiceSession, type VoiceState, type SaveStatus } from './voice-session';
+
+import { SavedConversations } from './SavedConversations';
 
 interface Health { realtimeConfigured: boolean; model: string; sessionMaxSeconds: number }
 
@@ -17,37 +19,33 @@ export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState(false);
   const [checking, setChecking] = useState(true);
+  const [saving, setSaving] = useState<SaveStatus>({ state: 'off' });
 
-  async function checkBackend() {
-    setChecking(true);
-    setHealthError(false);
-    try {
-      const response = await fetch('/api/health', { signal: AbortSignal.timeout(5000) });
-      if (!response.ok) throw new Error('Unavailable');
-      setHealth(await response.json() as Health);
-    } catch { setHealth(null); setHealthError(true); }
-    finally { setChecking(false); }
-  }
-
-  useEffect(() => {
-    const controller = new VoiceSession(audio.current!, setVoice);
-    session.current = controller;
-    void checkBackend();
-    const leave = () => controller.end();
-    window.addEventListener('pagehide', leave);
-    return () => { window.removeEventListener('pagehide', leave); controller.dispose(); session.current = null; };
+  const checkBackend = useCallback((signal?: AbortSignal) => {
+    return fetch('/api/health', { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000) })
+      .then(async response => { if (!response.ok) throw new Error('Unavailable'); return await response.json() as Health; })
+      .then(value => { if (!signal?.aborted) { setHealth(value); setHealthError(false); } })
+      .catch(() => { if (!signal?.aborted) { setHealth(null); setHealthError(true); } })
+      .finally(() => { if (!signal?.aborted) setChecking(false); });
   }, []);
 
+  useEffect(() => {
+    const controller = new VoiceSession(audio.current!, setVoice, undefined, setSaving);
+    session.current = controller;
+    const healthCheck = new AbortController();
+    void checkBackend(healthCheck.signal);
+    const leave = () => controller.end();
+    window.addEventListener('pagehide', leave);
+    return () => { healthCheck.abort(); window.removeEventListener('pagehide', leave); controller.dispose(); session.current = null; };
+  }, [checkBackend]);
+
+  const startConversation = () => { void session.current?.start(true); };
   const active = voice.status === 'connecting' || voice.status === 'connected';
   const canStart = !checking && health?.realtimeConfigured && !active;
-  const label = active ? voice.muted ? 'Microphone muted' : voice.status === 'connecting' ? 'Connecting' : 'Connected'
-    : checking ? 'Checking connection' : healthError ? 'Backend unavailable' : health?.realtimeConfigured ? 'Ready to talk' : 'Setup needed';
 
   return <div className="app-shell">
     <header className="topbar">
       <a className="wordmark" href="/" aria-label="Voxa home">Voxa</a>
-      <span className="prototype-label">PERSONAL VOICE COMPANION <span> / </span> FIRST CONVERSATION</span>
-      <div className="connection-badge"><span className={active ? 'dot connected' : 'dot'} />{label}</div>
     </header>
 
     <main>
@@ -64,18 +62,20 @@ export function App() {
           <p>{voice.message}</p>
         </div>
         <div className="session-controls">
-          {!active ? <button className="button primary" disabled={!canStart} onClick={() => void session.current?.start()}><MicIcon />Start conversation</button>
+          {!active ? <button className="button primary" disabled={!canStart} onClick={startConversation}><MicIcon />Start conversation</button>
             : <><button className="button secondary" disabled={voice.status !== 'connected'} aria-pressed={voice.muted} onClick={() => session.current?.toggleMute()}><MicIcon muted={voice.muted} />{voice.muted ? 'Unmute' : 'Mute'}</button><button className="button end" onClick={() => session.current?.end()}><span className="stop-icon" />End session</button></>}
         </div>
-        <p className="session-note">Audio in, audio out <span>·</span> No recordings or saved conversations</p>
+        {saving.state !== 'off' && <p className={`save-status ${saving.state}`} role="status">{saving.state === 'saving' ? 'Saving transcript…' : saving.state === 'finalizing' ? 'Finishing final transcript… Microphone is off.' : saving.state === 'saved' ? 'Received turns saved locally' : saving.state === 'delayed' ? 'Saving delayed. Conversation can continue.' : 'Capture incomplete. Some turns may not be saved.'}</p>}
         <audio ref={audio} autoPlay />
       </section>
 
       {(!health?.realtimeConfigured || healthError) && <aside className="setup-note" aria-label="Connection setup">
         <span className="setup-number">01</span><div><strong>{checking ? 'Checking your local connection…' : healthError ? 'Start the local backend to continue.' : 'One small setup step before we talk.'}</strong>
-          <p>{healthError ? 'Run npm run dev from the repo, then check again.' : 'Add your OpenAI API key to the server .env file, restart the app, and check again. Your key stays on your computer’s backend.'}</p></div>
-        <button className="text-button" onClick={() => void checkBackend()} disabled={checking}>{checking ? 'Checking…' : 'Check again'}<span aria-hidden="true">↗</span></button>
+          <p>{healthError ? 'Run make dev from the repo, then check again.' : 'Add your OpenAI API key to the backend/.env file, restart the app, and check again. Your key stays on your computer’s backend.'}</p></div>
+        <button className="text-button" onClick={() => { setChecking(true); setHealthError(false); void checkBackend(); }} disabled={checking}>{checking ? 'Checking…' : 'Check again'}<span aria-hidden="true">↗</span></button>
       </aside>}
+
+      <SavedConversations active={active} conversationId={saving.conversationId} />
 
       <section className="conversation-starters" aria-label="Ideas for your first conversation">
         <div className="section-label">NOT SURE WHERE TO START?</div>
@@ -86,6 +86,11 @@ export function App() {
         </div>
       </section>
     </main>
-    <footer><span>A conversation, at your pace.</span><span>{health ? `${health.sessionMaxSeconds / 60}-minute trial limit` : 'Local prototype'} <span className="footer-dot">·</span> Learning modes coming next</span></footer>
+    <footer><span>A conversation, at your pace.</span>
+      <details className="privacy-details"><summary>Privacy &amp; memory</summary><div>
+        <p>Conversation text is saved on this computer for 30 days. No audio recordings are stored. You can delete saved conversations at any time.</p>
+        <p>New conversations automatically use compact context from up to three recent ended sessions. Titles and summaries are prepared after final saving and use the OpenAI API.</p>
+      </div></details>
+      <span>{health ? `${health.sessionMaxSeconds / 60}-minute session limit` : 'Local prototype'}</span></footer>
   </div>;
 }
