@@ -145,10 +145,16 @@ async def test_no_save_has_no_archive_observer_or_summary(system):
     assert await app.state.store.run("list") == []
 
 
-async def test_automatic_history_in_unsaved_session_protects_sources(system):
+async def test_selected_history_in_unsaved_session_protects_sources(system):
     app, client, provider = system
     source_id = await seed(app.state.store)
-    response = (await client.post("/api/session", json={"save": False})).json()
+    await app.state.summaries.tick()
+    preview = (
+        await client.post("/api/context/preview", json={"ids": [source_id], "summariesOnly": True})
+    ).json()
+    response = (
+        await client.post("/api/session", json={"save": False, "contextToken": preview["token"]})
+    ).json()
     assert "Synthetic" in response["context"]["text"]
     assert (await client.delete(f"/api/conversations/{source_id}")).status_code == 409
     await client.post("/api/call", json={"handle": response["handle"], "sdp": "offer"})
@@ -207,3 +213,145 @@ async def test_explicit_preview_and_summary_endpoints(system):
     assert (await client.post("/api/session", json={"contextToken": preview.json()["token"]})).json()[
         "code"
     ] == "PREVIEW_EXPIRED"
+
+
+@pytest.mark.parametrize("save", [False, True])
+async def test_history_item_id_fits_realtime_limit(system, save):
+    app, client, _ = system
+    source_id = await seed(app.state.store)
+    await app.state.summaries.tick()
+    ids = []
+    for _ in range(2):
+        preview = (
+            await client.post("/api/context/preview", json={"ids": [source_id], "summariesOnly": True})
+        ).json()
+        response = await client.post("/api/session", json={"save": save, "contextToken": preview["token"]})
+        assert response.status_code == 200
+        payload = response.json()
+        item_id = payload["context"]["itemId"]
+        assert item_id.startswith("voxa_context_")
+        assert len(item_id) <= 32
+        ids.append(item_id)
+        await client.post("/api/capture/end", json={"handle": payload["handle"]})
+    assert ids[0] != ids[1]
+
+
+async def test_start_uses_no_history_by_default_even_with_ready_archive(system):
+    app, client, provider = system
+    await seed(app.state.store)
+    await app.state.summaries.tick()
+
+    response = await client.post("/api/session", json={"save": True})
+    assert response.status_code == 200
+    assert "context" not in response.json()
+    assert not app.state.previews.reservations
+    assert provider.created
+
+
+async def test_selected_summary_preview_excludes_all_transcript_excerpts_and_other_sources(system):
+    app, client, provider = system
+    selected = await seed(app.state.store, text="PRIVATE_RAW_SELECTED")
+    unselected = await seed(app.state.store, text="PRIVATE_RAW_UNSELECTED")
+    await app.state.summaries.tick()
+    await app.state.summaries.tick()
+    calls = len(provider.summary_calls)
+    preview = await client.post("/api/context/preview", json={"ids": [selected], "summariesOnly": True})
+    assert preview.status_code == 200
+    packet = preview.json()
+    assert packet["summariesOnly"] is True
+    assert packet["sections"][0]["recentTurns"] == []
+    assert "Synthetic topic" in packet["text"]
+    assert "PRIVATE_RAW" not in packet["text"]
+    assert [source["id"] for source in packet["sessions"]] == [selected]
+    response = await client.post("/api/session", json={"save": True, "contextToken": packet["token"]})
+    assert response.status_code == 200
+    assert response.json()["context"]["text"] == packet["text"]
+    assert len(response.json()["context"]["text"].encode()) <= 6000
+    assert len(provider.summary_calls) == calls
+    assert (await client.delete(f"/api/conversations/{selected}")).status_code == 409
+    assert (await client.delete(f"/api/conversations/{unselected}")).status_code == 200
+
+
+async def test_selected_memory_needs_a_ready_nonempty_summary_without_excerpt_fallback(system):
+    app, client, provider = system
+    pending = await seed(app.state.store, text="NO_FALLBACK")
+    response = await client.post("/api/context/preview", json={"ids": [pending], "summariesOnly": True})
+    assert response.status_code == 409 and response.json()["code"] == "SUMMARY_PENDING"
+    assert not provider.created and not provider.summary_calls
+    await app.state.summaries.tick()
+    source = await app.state.store.run("get", {"id": pending})
+    await app.state.store.run(
+        "turn",
+        {
+            "id": pending,
+            "providerSessionId": "fixture",
+            "turn": {**source["turns"][0], "revision": 2, "text": "UPDATED"},
+        },
+    )
+    response = await client.post("/api/context/preview", json={"ids": [pending], "summariesOnly": True})
+    assert response.status_code == 409 and response.json()["code"] == "SUMMARY_PENDING"
+
+
+async def test_summary_only_selection_rejects_empty_ready_insights(system):
+    app, client, provider = system
+    empty = await seed(app.state.store, ready=True)
+    response = await client.post("/api/context/preview", json={"ids": [empty], "summariesOnly": True})
+    assert response.status_code == 409 and response.json()["code"] == "NO_CONTEXT"
+    assert not provider.created and not provider.summary_calls
+
+
+async def test_three_selected_summaries_keep_whole_bilingual_points_within_budget(system, monkeypatch):
+    app, client, provider = system
+
+    async def summarize(*args):
+        return {
+            "title": "合成摘要",
+            "titleSourceTurnIds": ["u"],
+            "points": [
+                {"kind": "fact", "text": f"{n} 中🌿" + "中" * 225, "sourceTurnIds": ["u"]} for n in range(8)
+            ],
+        }
+
+    monkeypatch.setattr(provider, "summarize", summarize)
+    ids = []
+    for _ in range(3):
+        ids.append(await seed(app.state.store, text="RAW_DO_NOT_INCLUDE"))
+        await app.state.summaries.tick()
+    response = await client.post("/api/context/preview", json={"ids": ids, "summariesOnly": True})
+    assert response.status_code == 200
+    packet = response.json()
+    assert len(packet["text"].encode()) <= 6000
+    assert "RAW_DO_NOT_INCLUDE" not in packet["text"]
+    assert all(section["points"] and not section["recentTurns"] for section in packet["sections"])
+    assert all(len(point["text"]) == 229 for section in packet["sections"] for point in section["points"])
+    assert any("omitted" in warning for warning in packet["warnings"])
+
+
+async def test_bulk_summary_selection_supports_more_than_three_sources(system):
+    app, client, _ = system
+    ids = []
+    for _ in range(4):
+        ids.append(await seed(app.state.store))
+        await app.state.summaries.tick()
+    response = await client.post("/api/context/preview", json={"ids": ids, "summariesOnly": True})
+    assert response.status_code == 200
+    packet = response.json()
+    assert [source["id"] for source in packet["sessions"]] == ids
+    assert all(section["points"] and not section["recentTurns"] for section in packet["sections"])
+    assert len(packet["text"].encode()) <= 6000
+
+
+@pytest.mark.parametrize("microphone", ["laptop", "headset"])
+async def test_microphone_profile_reaches_voice_provider(system, microphone):
+    _, client, provider = system
+    response = await client.post("/api/session", json={"microphone": microphone})
+    assert response.status_code == 200
+    assert provider.created[-1][2] == microphone
+
+
+@pytest.mark.parametrize("microphone", ["invalid", "far_field", "", None, 42])
+async def test_invalid_microphone_profile_rejected_before_provider(system, microphone):
+    _, client, provider = system
+    response = await client.post("/api/session", json={"microphone": microphone})
+    assert response.status_code == 400
+    assert not provider.created

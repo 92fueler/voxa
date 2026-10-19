@@ -8,21 +8,6 @@ from src.summaries import SummaryRunner, generate_summary, summary_input, valida
 from src.util import encode, now_ms
 
 
-async def test_auto_recent_three_bounded_unicode_fallback(store):
-    ids = []
-    for n in range(4):
-        ids.append(
-            await seed(store, started_at=now_ms() - 10000 + n * 1000, text=f"TOPIC{n} " + "中🌿" * 6000)
-        )
-    preview = await ContextPreviews(store).automatic()
-    assert preview is not None
-    assert [s["id"] for s in preview["sessions"]] == list(reversed(ids[1:]))
-    assert "TOPIC0" not in preview["text"] and "�" not in preview["text"]
-    assert len(preview["text"].encode()) <= 6000
-    assert all(s["recentTurns"] for s in preview["sections"])
-    assert "omitted" in " ".join(preview["warnings"])
-
-
 async def test_context_selection_reuse_stale_expiry_and_limit(store):
     item_id = await seed(store, ready=True, text="SELECTED")
     await seed(store, ready=True, text="UNSELECTED")
@@ -45,8 +30,20 @@ async def test_context_selection_reuse_stale_expiry_and_limit(store):
     now += 300001
     with pytest.raises(ContextError, match="expired"):
         await previews.take(packet["token"])
-    for _ in range(16):
+    oldest = await previews.preview([item_id])
+    for _ in range(20):
+        latest = await previews.preview([item_id])
+    assert len(previews.entries) == 16
+    with pytest.raises(ContextError, match="expired"):
+        await previews.take(oldest["token"])
+    await previews.take(latest["token"])
+    assert previews.uses(item_id)
+    for _ in range(20):
         await previews.preview([item_id])
+    assert previews.uses(item_id)
+    assert len(previews.entries) + len(previews.reservations) == 16
+    for packet in list(previews.entries.values()):
+        await previews.take(packet["token"])
     with pytest.raises(ContextError) as exc:
         await previews.preview([item_id])
     assert exc.value.code == "PREVIEW_LIMIT"
@@ -61,17 +58,24 @@ async def test_no_context_from_active_empty_deleted_interrupted_or_expired_sourc
     await store.run("create", {"id": "active", "startedAt": now_ms()})
     await store.run("create", {"id": "empty", "startedAt": now_ms()})
     await store.run("finish", {"id": "empty", "endedAt": now_ms(), "incomplete": False})
-    assert await ContextPreviews(store).automatic() is None
+    previews = ContextPreviews(store)
+    for source in [item_id, "active", "empty", "deleted"]:
+        with pytest.raises(ContextError):
+            await previews.preview([source], summaries_only=True)
+    assert not previews.entries
 
 
 async def test_history_failure_is_not_silently_ignored(system, monkeypatch):
     app, client, provider = system
+    item_id = await seed(app.state.store)
+    await app.state.summaries.tick()
+    packet = await app.state.previews.preview([item_id], summaries_only=True)
 
     async def fail(*args):
         raise RuntimeError("PRIVATE")
 
     monkeypatch.setattr(app.state.previews.store, "run", fail)
-    response = await client.post("/api/session", json={"save": True})
+    response = await client.post("/api/session", json={"save": True, "contextToken": packet["token"]})
     assert response.json()["code"] == "HISTORY_UNAVAILABLE"
     assert not provider.created and "PRIVATE" not in response.text
 
@@ -144,7 +148,7 @@ async def test_slow_summary_does_not_delay_voice(system):
             await asyncio.sleep(0.001)
         async with asyncio.timeout(0.5):
             response = await client.post("/api/session", json={"save": True})
-        assert response.status_code == 200 and response.json()["context"]
+        assert response.status_code == 200 and "context" not in response.json()
     finally:
         provider.summary_wait.set()
         await pending

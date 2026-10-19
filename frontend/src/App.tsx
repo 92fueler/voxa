@@ -1,5 +1,8 @@
+import { useConversationMemory } from './use-conversation-memory';
+import { LiveTranscriptView } from './LiveTranscriptView';
+import type { LiveTurn } from './live-transcript';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { initialVoiceState, VoiceSession, type VoiceState, type SaveStatus } from './voice-session';
+import { initialVoiceState, VoiceSession, type VoiceState, type SaveStatus, type MicrophoneProfile } from './voice-session';
 
 import { SavedConversations } from './SavedConversations';
 
@@ -19,6 +22,8 @@ export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState(false);
   const [checking, setChecking] = useState(true);
+  const [liveTurns, setLiveTurns] = useState<LiveTurn[]>([]);
+  const [microphone, setMicrophone] = useState<MicrophoneProfile>('laptop');
   const [saving, setSaving] = useState<SaveStatus>({ state: 'off' });
 
   const checkBackend = useCallback((signal?: AbortSignal) => {
@@ -30,7 +35,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const controller = new VoiceSession(audio.current!, setVoice, undefined, setSaving);
+    const controller = new VoiceSession(audio.current!, setVoice, undefined, setSaving, setLiveTurns);
     session.current = controller;
     const healthCheck = new AbortController();
     void checkBackend(healthCheck.signal);
@@ -39,8 +44,14 @@ export function App() {
     return () => { healthCheck.abort(); window.removeEventListener('pagehide', leave); controller.dispose(); session.current = null; };
   }, [checkBackend]);
 
-  const startConversation = () => { void session.current?.start(true); };
   const active = voice.status === 'connecting' || voice.status === 'connected';
+  const memory = useConversationMemory(active);
+  const startConversation = () => {
+    const token = memory.preview?.token;
+    const ids = [...memory.selected];
+    memory.consume();
+    void session.current?.start(true, token, token ? [] : ids, microphone);
+  };
   const canStart = !checking && health?.realtimeConfigured && !active;
 
   return <div className="app-shell">
@@ -61,11 +72,19 @@ export function App() {
           <h2>{voice.status === 'connected' ? voice.muted ? 'Take your time.' : 'I’m listening.' : voice.status === 'connecting' ? 'Let’s get connected.' : 'Your voice. A little clarity.'}</h2>
           <p>{voice.message}</p>
         </div>
+        <label className="microphone-profile">Microphone noise filter
+          <select aria-label="Microphone noise filter" value={microphone} disabled={active} onChange={event => setMicrophone(event.target.value as MicrophoneProfile)}>
+            <option value="laptop">Laptop microphone</option><option value="headset">Earbuds / headset</option>
+          </select>
+          <span>Match the microphone selected in your browser.</span>
+        </label>
         <div className="session-controls">
           {!active ? <button className="button primary" disabled={!canStart} onClick={startConversation}><MicIcon />Start conversation</button>
             : <><button className="button secondary" disabled={voice.status !== 'connected'} aria-pressed={voice.muted} onClick={() => session.current?.toggleMute()}><MicIcon muted={voice.muted} />{voice.muted ? 'Unmute' : 'Mute'}</button><button className="button end" onClick={() => session.current?.end()}><span className="stop-icon" />End session</button></>}
         </div>
         {saving.state !== 'off' && <p className={`save-status ${saving.state}`} role="status">{saving.state === 'saving' ? 'Saving transcript…' : saving.state === 'finalizing' ? 'Finishing final transcript… Microphone is off.' : saving.state === 'saved' ? 'Received turns saved locally' : saving.state === 'delayed' ? 'Saving delayed. Conversation can continue.' : 'Capture incomplete. Some turns may not be saved.'}</p>}
+        {voice.status === 'connected' && voice.turnStyle && <p className="save-status" role="status">{voice.turnStyle === 'thinking' ? 'Thinking pace · more time to speak' : 'Everyday pace'}{voice.turnStyleLocked ? ' · voice override' : ' · automatic'}</p>}
+        <LiveTranscriptView turns={liveTurns} />
         <audio ref={audio} autoPlay />
       </section>
 
@@ -75,7 +94,7 @@ export function App() {
         <button className="text-button" onClick={() => { setChecking(true); setHealthError(false); void checkBackend(); }} disabled={checking}>{checking ? 'Checking…' : 'Check again'}<span aria-hidden="true">↗</span></button>
       </aside>}
 
-      <SavedConversations active={active} conversationId={saving.conversationId} />
+      <SavedConversations active={active} conversationId={saving.conversationId} memory={memory} />
 
       <section className="conversation-starters" aria-label="Ideas for your first conversation">
         <div className="section-label">NOT SURE WHERE TO START?</div>
@@ -89,7 +108,7 @@ export function App() {
     <footer><span>A conversation, at your pace.</span>
       <details className="privacy-details"><summary>Privacy &amp; memory</summary><div>
         <p>Conversation text is saved on this computer for 30 days. No audio recordings are stored. You can delete saved conversations at any time.</p>
-        <p>New conversations automatically use compact context from up to three recent ended sessions. Titles and summaries are prepared after final saving and use the OpenAI API.</p>
+        <p>New conversations use only summaries you explicitly select in Saved conversations before Start. Nothing is selected by default. Titles and summaries are prepared after final saving and use the OpenAI API.</p>
       </div></details>
       <span>{health ? `${health.sessionMaxSeconds / 60}-minute session limit` : 'Local prototype'}</span></footer>
   </div>;

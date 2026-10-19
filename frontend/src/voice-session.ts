@@ -1,7 +1,11 @@
+import { isSummaryPreview } from './shared/continuity';
+import { LiveTranscript, type LiveTurn } from './live-transcript';
+import { initialTurnPreference, turnPreference, type TurnPreference, type TurnStyle } from './turn-style';
 import { realtimeProtocol, type RealtimeProtocol } from './providers/realtime-protocol';
+export type MicrophoneProfile = 'laptop' | 'headset';
 export type VoiceStatus = 'idle' | 'connecting' | 'connected' | 'ended' | 'error';
 export interface SaveStatus { state: 'off' | 'saving' | 'finalizing' | 'saved' | 'delayed' | 'incomplete'; conversationId?: string }
-export interface VoiceState { status: VoiceStatus; muted: boolean; message: string }
+export interface VoiceState { status: VoiceStatus; muted: boolean; message: string; turnStyle?: TurnStyle; turnStyleLocked?: boolean }
 export const initialVoiceState: VoiceState = { status: 'idle', muted: false, message: 'Ready when you are.' };
 
 export interface VoicePlatform {
@@ -24,6 +28,17 @@ interface Attempt {
   context?: { itemId: string; text: string };
   contextSent?: boolean;
   contextReady?: boolean;
+  preference: TurnPreference;
+  appliedStyle: TurnStyle;
+  styleRequest?: TurnStyle;
+  styleRequestId?: string;
+  styleSequence: number;
+  styleTimer?: ReturnType<typeof setTimeout>;
+  responseActive?: boolean;
+  outputActive?: boolean;
+  transcriptIds: Set<string>;
+  captions: LiveTranscript;
+  captionTimer?: ReturnType<typeof setTimeout>;
 }
 
 /** Owns audio resources. Persistence failures are reported independently of voice state. */
@@ -42,6 +57,7 @@ export class VoiceSession {
       createPeerConnection: () => new RTCPeerConnection(),
     },
     private onSave: (status: SaveStatus) => void = () => {},
+    private onTranscript: (turns: LiveTurn[]) => void = () => {},
   ) {}
 
   private update(state: VoiceState) {
@@ -53,6 +69,8 @@ export class VoiceSession {
     attempt.abort.abort();
     clearTimeout(attempt.setupTimer);
     clearTimeout(attempt.sessionTimer);
+    clearTimeout(attempt.styleTimer);
+    clearTimeout(attempt.captionTimer);
     attempt.stream?.getTracks().forEach(track => track.stop());
     const channel = attempt.channel;
     if (channel) {
@@ -97,7 +115,7 @@ export class VoiceSession {
     const attempt = this.attempt;
     this.attempt = undefined;
     if (attempt?.captureHandle && attempt.saveRequested) this.onSave({ state: 'finalizing' });
-    if (attempt) this.release(attempt, true);
+    if (attempt) { attempt.captions.finish(); this.onTranscript(attempt.captions.snapshot()); this.release(attempt, true); }
     if (attempt && !attempt.saveRequested) this.onSave({ state: 'off' });
     this.update({ status: 'ended', muted: false, message });
   }
@@ -105,6 +123,7 @@ export class VoiceSession {
   private fail(attempt: Attempt, message: string) {
     if (this.attempt !== attempt) return;
     this.attempt = undefined;
+    attempt.captions.finish(); this.onTranscript(attempt.captions.snapshot());
     this.release(attempt);
     if (attempt.saveRequested && !attempt.captureHandle) this.onSave({ state: 'incomplete' });
     this.update({ status: 'error', muted: false, message });
@@ -115,6 +134,25 @@ export class VoiceSession {
     const muted = !this.state.muted;
     this.attempt.stream.getAudioTracks().forEach(track => { track.enabled = !muted; });
     this.update({ ...this.state, muted, message: muted ? 'Microphone muted. End the session when you finish.' : 'Connected. Speak naturally; you can interrupt Voxa.' });
+  }
+
+  private styleUnavailable(attempt: Attempt) {
+    clearTimeout(attempt.styleTimer);
+    attempt.styleRequest = undefined;
+    // Keep voice and the last acknowledged setting; do not loop retries on every event.
+    attempt.preference = { style: attempt.appliedStyle, locked: attempt.preference.locked };
+    if (this.attempt === attempt && this.state.status === 'connected') this.update({ ...this.state, message: 'Turn-taking could not be changed. Conversation can continue; try the command again.' });
+  }
+
+  private applyTurnStyle(attempt: Attempt) {
+    if (attempt.styleRequest || attempt.preference.style === attempt.appliedStyle || attempt.inputActive || attempt.responseActive || attempt.outputActive || attempt.channel?.readyState !== 'open') return;
+    attempt.styleRequest = attempt.preference.style;
+    try {
+      attempt.channel.send(JSON.stringify(attempt.protocol.turnStyle(attempt.styleRequest, attempt.styleRequestId = `voxa_turn_style_${++attempt.styleSequence}`)));
+      attempt.styleTimer = setTimeout(() => {
+        if (this.attempt === attempt) this.styleUnavailable(attempt);
+      }, 5000);
+    } catch { this.styleUnavailable(attempt); }
   }
 
   private watchSaving(handle: string, conversationId: string, attempt: Attempt) {
@@ -140,16 +178,30 @@ export class VoiceSession {
     this.saveTimer = setTimeout(() => void poll(), 1000);
   }
 
-  async start(save = false, contextToken?: string) {
+  async start(save = false, contextToken?: string, contextIds: string[] = [], microphone?: MicrophoneProfile) {
     if (this.attempt) return;
     this.saveGeneration++; clearTimeout(this.saveTimer);
     this.onSave({ state: save ? 'saving' : 'off' });
-    const attempt: Attempt = { abort: new AbortController(), protocol: realtimeProtocol(), saveRequested: save };
+    const attempt: Attempt = { abort: new AbortController(), protocol: realtimeProtocol(), saveRequested: save, preference: { ...initialTurnPreference }, appliedStyle: 'everyday', transcriptIds: new Set(), styleSequence: 0, captions: new LiveTranscript() };
     this.attempt = attempt;
+    this.onTranscript([]);
     this.update({ status: 'connecting', muted: false, message: 'Allow microphone access to begin.' });
     attempt.setupTimer = setTimeout(() => this.fail(attempt, 'Connection setup timed out. Your microphone is off. Try again.'), 30_000);
 
     try {
+      if (!contextToken && contextIds.length) {
+        this.update({ status: 'connecting', muted: false, message: 'Loading selected summaries. Your microphone is off.' });
+        const previewResponse = await this.platform.fetch('/api/context/preview', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: contextIds, summariesOnly: true }), signal: attempt.abort.signal,
+        });
+        if (this.attempt !== attempt) return;
+        if (!previewResponse.ok) throw new Error('Saved history could not be loaded. Review your selection in Saved conversations and try again.');
+        const preview: unknown = await previewResponse.json();
+        if (this.attempt !== attempt) return;
+        if (!isSummaryPreview(preview, contextIds)) throw new Error('Saved history could not be loaded. Review your selection in Saved conversations and try again.');
+        contextToken = preview.token;
+      }
       const stream = await this.platform.getUserMedia();
       if (this.attempt !== attempt) {
         // getUserMedia cannot be aborted. Dispose a late permission result after End.
@@ -162,7 +214,7 @@ export class VoiceSession {
         track.onended = () => this.fail(attempt, 'Microphone disconnected. Connect it and start again.');
       });
       const credentialResponse = await this.platform.fetch('/api/session', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ save, ...(contextToken ? { contextToken } : {}) }), signal: attempt.abort.signal,
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ save, ...(contextToken ? { contextToken } : {}), ...(microphone ? { microphone } : {}) }), signal: attempt.abort.signal,
       });
       if (this.attempt !== attempt) return;
       if (!credentialResponse.ok) {
@@ -190,7 +242,7 @@ export class VoiceSession {
         }
       } else if (save) this.onSave({ state: 'incomplete' });
       if (contextToken || credential.context) {
-        if (!managedSession || typeof credential.context?.itemId !== 'string' || !/^voxa_context_[a-f0-9]{24}$/.test(credential.context.itemId) || typeof credential.context.text !== 'string' || !credential.context.text || new TextEncoder().encode(credential.context.text).length > 6000) throw new Error('Saved history could not be loaded. Start again.');
+        if (!contextToken || !managedSession || typeof credential.context?.itemId !== 'string' || !/^voxa_context_[a-f0-9]{18}$/.test(credential.context.itemId) || typeof credential.context.text !== 'string' || !credential.context.text || new TextEncoder().encode(credential.context.text).length > 6000) throw new Error('Saved history could not be loaded. Start again.');
         attempt.context = { itemId: credential.context.itemId, text: credential.context.text };
       }
       const peer = this.platform.createPeerConnection();
@@ -211,19 +263,53 @@ export class VoiceSession {
         }
         stream.getAudioTracks().forEach(track => { track.enabled = true; });
         clearTimeout(attempt.setupTimer);
-        this.update({ status: 'connected', muted: false, message: 'Connected. Speak naturally; you can interrupt Voxa.' });
+        this.update({ status: 'connected', muted: false, message: 'Connected. Speak naturally; you can interrupt Voxa.', turnStyle: attempt.appliedStyle, turnStyleLocked: attempt.preference.locked });
       };
       channel.onopen = ready;
       channel.onclose = () => this.fail(attempt, 'The voice connection closed. Your microphone is off. Start again to reconnect.');
       channel.onerror = () => this.fail(attempt, 'The voice connection failed. Your microphone is off. Try again.');
       channel.onmessage = event => {
-        // Inspect lifecycle types and cleanup error codes. Do not log, save, or display conversation payloads.
+        // Normalize only supported fields. Never log raw events, credentials or speech.
         try {
+          if (this.attempt !== attempt) return;
           const providerEvent = attempt.protocol.event(JSON.parse(String(event.data)));
+          if (providerEvent.caption && providerEvent.caption.itemId !== attempt.context?.itemId && attempt.captions.accept(providerEvent.caption)) {
+            if (providerEvent.caption.kind === 'final' || providerEvent.caption.kind === 'failed') {
+              clearTimeout(attempt.captionTimer); attempt.captionTimer = undefined;
+              this.onTranscript(attempt.captions.snapshot());
+            } else if (!attempt.captionTimer) {
+              attempt.captionTimer = setTimeout(() => {
+                attempt.captionTimer = undefined;
+                if (this.attempt === attempt) this.onTranscript(attempt.captions.snapshot());
+              }, 80);
+            }
+          }
           if (providerEvent.contextItemId === attempt.context?.itemId && attempt.context && providerEvent.contextItemId) { attempt.contextReady = true; ready(); }
           if (providerEvent.inputActive !== undefined) attempt.inputActive = providerEvent.inputActive;
+          if (providerEvent.responseActive !== undefined) attempt.responseActive = providerEvent.responseActive;
+          if (providerEvent.outputActive !== undefined) attempt.outputActive = providerEvent.outputActive;
+          if (providerEvent.userTranscript && !attempt.transcriptIds.has(providerEvent.userTranscript.id) && providerEvent.userTranscript.id !== attempt.context?.itemId) {
+            // Bound deduplication to the provider's existing per-session item budget.
+            if (attempt.transcriptIds.size < 2000) {
+              attempt.transcriptIds.add(providerEvent.userTranscript.id);
+              attempt.preference = turnPreference(providerEvent.userTranscript.text, attempt.preference);
+            }
+          }
+          if (providerEvent.acknowledgedStyle) {
+            if (!attempt.styleRequest) attempt.preference = { ...attempt.preference, style: providerEvent.acknowledgedStyle };
+            attempt.appliedStyle = providerEvent.acknowledgedStyle;
+            if (attempt.styleRequest === providerEvent.acknowledgedStyle) {
+              clearTimeout(attempt.styleTimer);
+              attempt.styleRequest = undefined;
+            }
+          }
+          if (providerEvent.styleRejected && providerEvent.styleRejected === attempt.styleRequestId && attempt.styleRequest) this.styleUnavailable(attempt);
+          if (this.state.status === 'connected' && this.attempt === attempt) {
+            if (this.state.turnStyle !== attempt.appliedStyle || this.state.turnStyleLocked !== attempt.preference.locked) this.update({ ...this.state, turnStyle: attempt.appliedStyle, turnStyleLocked: attempt.preference.locked });
+            this.applyTurnStyle(attempt);
+          }
           if (providerEvent.failed) {
-            this.fail(attempt, 'The voice service reported an error. Your microphone is off. Try again.');
+            this.fail(attempt, `The voice service reported an error${providerEvent.errorCode ? ` (${providerEvent.errorCode})` : ''}. Your microphone is off. Try again.`);
           }
         } catch { /* Ignore non-JSON events. */ }
       };

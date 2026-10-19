@@ -2,7 +2,9 @@
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
+
+MicrophoneProfile = Literal["laptop", "headset"]
 
 
 class ProviderError(Exception):
@@ -44,7 +46,9 @@ class VoiceProvider(Protocol):
     configured: bool
     wire_protocol: str
 
-    async def create_session(self, save: bool, instructions: str) -> VoiceCredential: ...
+    async def create_session(
+        self, save: bool, instructions: str, microphone: MicrophoneProfile = "laptop"
+    ) -> VoiceCredential: ...
     async def connect_call(self, credential: VoiceCredential, sdp: str) -> CallAnswer: ...
     def observer(self, call_id: str, ignored_items: list[str]) -> TranscriptObserver: ...
 

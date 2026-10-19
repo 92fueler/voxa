@@ -10,8 +10,7 @@ it('groups each conversation once and keeps removed categories in Uncategorized'
   expect(groups.flatMap(g => g.conversations)).toHaveLength(4);
 });
 
-it('keeps empty categories available for compact heading menus', () => {
+it('omits empty categories from the conversation list', () => {
   const categories = [{ id: 'empty', name: 'Empty category' }];
   expect(groupConversations([], categories)).toEqual([]);
-  expect(groupConversations([], categories, true)).toEqual([{ ...categories[0], conversations: [] }]);
 });

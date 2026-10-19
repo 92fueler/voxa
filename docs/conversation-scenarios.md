@@ -1,6 +1,6 @@
 # Initial voice evaluation scenarios (V00)
 
-These are synthetic inputs and planned human listening checks, not recorded model results. Run the same cases with each model and prompt version. Record VAD policy, device/browser, session duration, and repetitions before comparing results. Begin with three repetitions per selected case for exploratory comparison; this is not enough to establish reliable p95 latency or a population success rate.
+These are synthetic inputs and planned human listening checks, not recorded model results. Run the same cases with each model and prompt version. Current app supports one basic conversation flow with dynamic pacing, explicit summary selection and microphone noise profiles; dedicated/scored learning modes and manual completion remain planned. Record microphone noise-filter choice and actual input device separately, VAD policy, browser, session duration, and repetitions before comparing results. Begin with three repetitions per selected case for exploratory comparison; this is not enough to establish reliable p95 latency or a population success rate.
 
 ## Review rubric
 
@@ -72,13 +72,37 @@ Expected: clarify the vague criticism or offer conditional alternatives, then he
 
 Explain a technical idea with two pauses of approximately two seconds and an unfinished phrase such as “The trade-off is… um…”. Run separately with patient and ordinary VAD profiles.
 
-Expected: allow the explanation to continue; record each premature reply and whether manual completion avoids it. Failure: repeated interruptions before the thought is complete. A single trial cannot establish an optimal VAD policy.
+Expected: allow the explanation to continue; record each premature reply. Check manual completion only after that planned mode is implemented. Failure: repeated interruptions before the thought is complete. A single trial cannot establish an optimal VAD policy.
 
 ### C02 — Interrupt output
 
 Ask for a short explanation, then interrupt with “Wait, explain that last part more simply.”
 
 Expected: stop the prior response and respond to the new request. Mark the interrupted assistant turn incomplete; do not claim to know its exact heard-word boundary. Failure: continue talking over the interruption or silently archive all generated text as heard.
+
+### C03 — Typing without speech (pending listening acceptance)
+
+With the built-in microphone selected by the browser, choose Laptop microphone before Start. Ask for a short explanation and type normally while Voxa speaks, without speaking yourself. Repeat separately with earbuds selected by the browser and the Earbuds / headset filter. Record speech-start events/unconfirmed or empty captions and unintended playback cuts where observable; do not store private audio.
+
+Expected: keyboard noise does not repeatedly cancel replies. Failure: Voxa cuts off while the user is silent, especially with empty detected user turns. Empty transcription and interrupted archive markers support investigation but do not independently prove which noise caused the event. Do not count a mocked session-update test as this listening result.
+
+### C04 — Genuine and quiet bilingual interruption (pending listening acceptance)
+
+For each matching microphone/filter setup, interrupt a reply with “Wait, explain that more simply,” then try “等一下，用中文解释。” Speak a short quiet sentence afterward at a normal usable distance.
+
+Expected: real spoken interruption remains usable and quiet/mixed-language content is understood without requiring shouting. The live draft may change; exact provider final text replaces it and may contain ASR mistakes. Failure: filtering rejects ordinary quiet speech, loses important syllables, or makes interruption unusably slow. A final caption is not a save acknowledgment or proof of the exact audio-model interpretation.
+
+### C05 — Switch microphone setups between calls
+
+End the call, select a different physical input in the browser/OS, then choose the matching Microphone noise filter and Start again. Test laptop and headset in both orders. During connecting/connected voice, confirm that the filter selector is disabled. Reload only while idle and check that it returns to Laptop microphone.
+
+Expected: the next call uses the selected profile without editing configuration or restarting services. The selector is a filter choice, not an input-device picker; changing hardware during a call is not automatically reclassified. Failure: profile changes clear selected memory, alter the active call or silently route a different device.
+
+### C06 — Selected summaries and fresh-start isolation
+
+Using disposable synthetic sources, prepare a category with ready ended summaries and an empty conversation. Select the category, unselect one ready source, review Selected insights, then Start. Separately clear all sources and start fresh. For the selected run, ask about a distinctive fact supported by an included point; also ask about an unselected source.
+
+Expected: bulk selection checks ready sources and visibly explains exclusions; only selected summary points load, with no transcript fallback or automatic latest-three context. Context too large for every source to contribute blocks setup with a clear error. Start remains stable while previews load; early Start validates selection before acquiring the microphone. No-selection startup supplies no archive. Failure: unselected content appears, a source is silently omitted from the packet, or a preview failure silently starts without selected memory. Repeated checkbox edits must not exhaust unused-preview capacity; actual spoken recall remains a separate provider/listening check.
 
 ## Additional modes
 
@@ -98,7 +122,7 @@ Expected: adapt the hint and allow another attempt, then provide the direct expl
 
 ```text
 Date / case / model / prompt version:
-Device / browser / VAD profile / repetition:
+Actual input device / browser / microphone noise filter / VAD pace and override / repetition:
 Dimension ratings and critical failures:
 Observed behavior (brief; no private audio or transcripts):
 Latency measurement or explicitly labeled proxy:

@@ -13,7 +13,8 @@ from src.providers.openai import OpenAIProvider
 
 
 @pytest.mark.parametrize("save", [False, True])
-async def test_openai_voice_contract(save):
+@pytest.mark.parametrize("microphone,noise_reduction", [("headset", "near_field"), ("laptop", "far_field")])
+async def test_openai_voice_contract(save, microphone, noise_reduction):
     seen = []
 
     async def handler(request):
@@ -31,7 +32,7 @@ async def test_openai_voice_contract(save):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         provider = OpenAIProvider(Config(api_key="permanent-fixture"), client)
-        credential = await provider.create_session(save, "instructions")
+        credential = await provider.create_session(save, "instructions", microphone)
         answer = await provider.connect_call(credential, "offer")
         assert answer.call_id == "rtc_owned" and answer.sdp == "answer"
         body = json.loads(seen[0].content)
@@ -40,10 +41,11 @@ async def test_openai_voice_contract(save):
         assert body["session"]["audio"]["output"]["voice"] == "marin"
         assert body["session"]["audio"]["input"]["turn_detection"] == {
             "type": "semantic_vad",
-            "eagerness": "low",
+            "eagerness": "medium",
             "create_response": True,
             "interrupt_response": True,
         }
+        assert body["session"]["audio"]["input"]["noise_reduction"] == {"type": noise_reduction}
         assert ("transcription" in body["session"]["audio"]["input"]) == save
         assert body["session"]["tracing"] is None
         assert seen[0].headers["authorization"] == "Bearer permanent-fixture"

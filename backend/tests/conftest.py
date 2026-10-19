@@ -49,8 +49,8 @@ class FakeProvider:
         self.call_id = "fixture-call"
         self.summary_wait = None
 
-    async def create_session(self, save, instructions):
-        self.created.append((save, instructions))
+    async def create_session(self, save, instructions, microphone="laptop"):
+        self.created.append((save, instructions, microphone))
         if self.create_error:
             raise self.create_error
         return VoiceCredential("ek_fixture", now_ms() / 1000 + 60)

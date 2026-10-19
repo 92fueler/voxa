@@ -25,18 +25,18 @@ function useCategoryChange({ refresh, onError }: Actions) {
   }
   return { busy, change };
 }
-export function CategoryManager({ categories, ...actions }: Actions & { categories: Category[] }) {
+export function CategoryManager({ categories, emptyCategories = [], ...actions }: Actions & { categories: Category[]; emptyCategories?: Category[] }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const { busy, change } = useCategoryChange(actions);
   const root = useDismiss(open, () => { if (!busy) setOpen(false); });
   return <div ref={root} className="category-actions">
-    <button className="text-button" aria-expanded={open} disabled={busy || categories.length >= 50} onClick={() => setOpen(!open)}>+ Category</button>
-    {open && <form className="category-popover" aria-label="Create category" onSubmit={event => { event.preventDefault(); void change('/api/categories', 'POST', name).then(ok => { if (ok) { setOpen(false); setName(''); } }); }}>
-      <label htmlFor="new-category-name">Category name</label>
+    <button className="text-button" aria-expanded={open} disabled={busy} onClick={() => setOpen(!open)}>+ Category</button>
+    {open && <div className="category-popover"><form aria-label="Create category" onSubmit={event => { event.preventDefault(); void change('/api/categories', 'POST', name).then(ok => { if (ok) { setOpen(false); setName(''); } }); }}>
+      {categories.length >= 50 && <p>Category limit reached. Remove a category before creating another.</p>}<label htmlFor="new-category-name">Category name</label>
       <input id="new-category-name" autoFocus disabled={busy} maxLength={60} value={name} onChange={event => setName(event.target.value)} placeholder="e.g. English practice" />
-      <div><button className="text-button" disabled={busy || !name.trim()}>Create</button><button className="text-button" type="button" disabled={busy} onClick={() => setOpen(false)}>Cancel</button></div>
-    </form>}
+      <div><button className="text-button" disabled={busy || categories.length >= 50 || !name.trim()}>Create</button><button className="text-button" type="button" disabled={busy} onClick={() => setOpen(false)}>Cancel</button></div>
+    </form>{emptyCategories.length > 0 && <div className="empty-category-management"><p>Empty categories</p>{emptyCategories.map(category => <div key={category.id}><span>{category.name}</span><CategoryMenu category={category} {...actions} /></div>)}</div>}</div>}
   </div>;
 }
 export function CategoryMenu({ category, ...actions }: Actions & { category: Category }) {

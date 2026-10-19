@@ -59,7 +59,7 @@ class OpenAIProvider:
             raise ProviderError("PROVIDER_REJECTED")
         return response
 
-    async def create_session(self, save, instructions):
+    async def create_session(self, save, instructions, microphone="laptop"):
         response = await self._post(
             "/realtime/client_secrets",
             timeout=10,
@@ -73,10 +73,13 @@ class OpenAIProvider:
                     "instructions": instructions,
                     "audio": {
                         "input": {
+                            "noise_reduction": {
+                                "type": "near_field" if microphone == "headset" else "far_field"
+                            },
                             **({"transcription": {"model": "gpt-4o-mini-transcribe"}} if save else {}),
                             "turn_detection": {
                                 "type": "semantic_vad",
-                                "eagerness": "low",
+                                "eagerness": "medium",
                                 "create_response": True,
                                 "interrupt_response": True,
                             },

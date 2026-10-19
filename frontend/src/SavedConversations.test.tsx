@@ -53,11 +53,13 @@ it('requires confirmation and refreshes the list after deletion', async () => {
   render(<SavedConversations active={false} />);
   fireEvent.click(screen.getByRole('button', { name: 'Saved conversations +' }));
   await screen.findByText(item.title);
-  fireEvent.click(screen.getByRole('button', { name: /Delete conversation from/ }));
+  fireEvent.click(screen.getByLabelText(`Actions for ${item.title}`));
+  fireEvent.click(screen.getByRole('button', { name: 'Delete conversation' }));
   expect(removed).toBe(false);
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
   expect(removed).toBe(false);
-  fireEvent.click(screen.getByRole('button', { name: /Delete conversation from/ }));
+  fireEvent.click(screen.getByLabelText(`Actions for ${item.title}`));
+  fireEvent.click(screen.getByRole('button', { name: 'Delete conversation' }));
   fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }));
   await screen.findByText('No saved conversations yet.');
   expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'DELETE')).toHaveLength(1);
@@ -68,12 +70,16 @@ it('refreshes grouped history after changing a conversation category', async () 
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     if (url === '/api/categories') return Response.json([{ id: 'work', name: 'Work' }]);
     if (init?.method === 'PATCH') { categoryId = JSON.parse(String(init.body)).categoryId; return Response.json({ ok: true }); }
+    if (url === '/api/conversations/synthetic-a') return Response.json({ ...detail('Synthetic text'), categoryId });
     return Response.json([{ ...item, categoryId }]);
   }));
   render(<SavedConversations active={false} />);
   fireEvent.click(screen.getByRole('button', { name: 'Saved conversations +' }));
-  await screen.findByText(item.title);
+  fireEvent.click(await screen.findByRole('button', { name: item.title }));
+  await screen.findByText('Synthetic text');
   fireEvent.change(screen.getByRole('combobox'), { target: { value: 'work' } });
+  await waitFor(() => expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('work'));
+  fireEvent.click(screen.getByRole('button', { name: 'Back to list' }));
   const group = await screen.findByRole('region', { name: 'Work' });
   await waitFor(() => expect(group.textContent).toContain(item.title));
 });

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { LiveTurn } from './live-transcript';
 import { VoiceSession, type VoicePlatform, type VoiceState } from './voice-session';
 
 function deferred<T>() {
@@ -30,9 +31,10 @@ function setup() {
     createPeerConnection: () => peer as unknown as RTCPeerConnection,
   };
   const states: VoiceState[] = [];
-  const session = new VoiceSession(audio as unknown as HTMLAudioElement, state => states.push(state), platform);
+  const captions: LiveTurn[][] = [];
+  const session = new VoiceSession(audio as unknown as HTMLAudioElement, state => states.push(state), platform, undefined, turns => captions.push(turns));
   const connected = () => { peer.connectionState = 'connected'; channel.readyState = 'open'; channel.onopen?.(); peer.onconnectionstatechange?.(); };
-  return { session, states, platform, fetchMock, track, stream, peer, channel, audio, connected };
+  return { session, states, platform, fetchMock, track, stream, peer, channel, audio, connected, captions };
 }
 
 const active: VoiceSession[] = [];
@@ -301,11 +303,11 @@ it('ignores harmless idle cancellation but still stops on unexpected provider er
 });
 
 it('loads selected context once and keeps the microphone muted until its acknowledgment', async () => {
-  const s = scenario(); const itemId = `voxa_context_${'a'.repeat(24)}`;
+  const s = scenario(); const itemId = `voxa_context_${'a'.repeat(18)}`;
   s.fetchMock.mockImplementation(async url => url === '/api/session' ? Response.json({ handle: 'b'.repeat(64), conversationId: 'c', sessionMaxSeconds: 2700, context: { itemId, text: 'Synthetic selected context: Orchard.' } }) : new Response('answer'));
   await s.session.start(true, 'c'.repeat(64)); s.connected();
   expect(s.track.enabled).toBe(false); expect(s.states.at(-1)?.status).toBe('connecting');
-  const sent = JSON.parse(s.channel.send.mock.calls[0][0]); expect(sent.type).toBe('conversation.item.create'); expect(sent.item.role).toBe('user'); expect(sent.item.content[0].text).toContain('Orchard');
+  const sent = JSON.parse(s.channel.send.mock.calls[0][0]); expect(sent.item.id.length).toBeLessThanOrEqual(32); expect(sent.type).toBe('conversation.item.create'); expect(sent.item.role).toBe('user'); expect(sent.item.content[0].text).toContain('Orchard');
   s.channel.onopen?.(); expect(s.channel.send).toHaveBeenCalledOnce();
   s.channel.onmessage?.({ data: JSON.stringify({ type: 'conversation.item.done', item: { id: 'unrelated' } }) }); expect(s.track.enabled).toBe(false);
   s.channel.onmessage?.({ data: JSON.stringify({ type: 'conversation.item.done', item: { id: itemId } }) });
@@ -315,7 +317,7 @@ it('loads selected context once and keeps the microphone muted until its acknowl
 it('cleans up when selected context is missing, rejected or never acknowledged', async () => {
   vi.useFakeTimers();
   const s = scenario();
-  s.fetchMock.mockImplementation(async url => url === '/api/session' ? Response.json({ handle: 'b'.repeat(64), conversationId: 'c', sessionMaxSeconds: 2700, context: { itemId: `voxa_context_${'a'.repeat(24)}`, text: 'Synthetic context' } }) : new Response('answer'));
+  s.fetchMock.mockImplementation(async url => url === '/api/session' ? Response.json({ handle: 'b'.repeat(64), conversationId: 'c', sessionMaxSeconds: 2700, context: { itemId: `voxa_context_${'a'.repeat(18)}`, text: 'Synthetic context' } }) : new Response('answer'));
   await s.session.start(true, 'c'.repeat(64)); s.connected(); await vi.advanceTimersByTimeAsync(30_000);
   expect(s.track.stop).toHaveBeenCalledOnce(); expect(s.states.at(-1)?.status).toBe('error'); expect(s.peer.close).toHaveBeenCalledOnce();
   const missing = scenario(); await missing.session.start(true, 'a'.repeat(64)); expect(missing.track.stop).toHaveBeenCalledOnce(); expect(missing.states.at(-1)?.message).toContain('Saved history');
@@ -329,18 +331,232 @@ it('ends the registered capture if setup returns invalid selected context', asyn
   expect(s.fetchMock).toHaveBeenCalledWith('/api/capture/end', expect.objectContaining({ body: JSON.stringify({ handle: 'b'.repeat(64) }), keepalive: true }));
 });
 
-it('automatically loads history without a selection token and releases an unsaved session immediately', async () => {
-  const s=scenario(); const itemId=`voxa_context_${'a'.repeat(24)}`;
-  s.fetchMock.mockImplementation(async url=>url==='/api/session'?Response.json({handle:'b'.repeat(64),conversationId:'c',sessionMaxSeconds:2700,context:{itemId,text:'Synthetic automatic context'}}):new Response('answer'));
-  await s.session.start(false); expect(s.track.enabled).toBe(false); s.connected(); expect(s.states.at(-1)?.status).toBe('connecting');
+it('loads explicitly selected history and releases an unsaved session immediately', async () => {
+  const s=scenario(); const itemId=`voxa_context_${'a'.repeat(18)}`;
+  s.fetchMock.mockImplementation(async url=>url==='/api/session'?Response.json({handle:'b'.repeat(64),conversationId:'c',sessionMaxSeconds:2700,context:{itemId,text:'Synthetic selected context'}}):new Response('answer'));
+  await s.session.start(false, 'c'.repeat(64)); expect(s.track.enabled).toBe(false); s.connected(); expect(s.states.at(-1)?.status).toBe('connecting');
   s.channel.onmessage?.({data:JSON.stringify({type:'conversation.item.done',item:{id:itemId}})});
   expect(s.track.enabled).toBe(true); expect(s.states.at(-1)?.status).toBe('connected');
-  expect(JSON.parse(String(s.fetchMock.mock.calls[0][1]?.body))).toEqual({save:false});
+  expect(JSON.parse(String(s.fetchMock.mock.calls[0][1]?.body))).toEqual({save:false,contextToken:'c'.repeat(64)});
   s.session.end(); expect(s.peer.close).toHaveBeenCalledOnce(); expect(s.fetchMock).toHaveBeenCalledWith('/api/capture/end',expect.anything());
 });
 
-it('releases the microphone when automatic history is unavailable', async () => {
+it('releases the microphone when selected history is unavailable', async () => {
   const s=scenario(); s.fetchMock.mockResolvedValue(Response.json({code:'HISTORY_UNAVAILABLE'},{status:409}));
   await s.session.start(true); expect(s.track.stop).toHaveBeenCalledOnce(); expect(s.peer.createDataChannel).not.toHaveBeenCalled();
   expect(s.states.at(-1)?.message).toContain('Saved history is unavailable'); expect(s.states.at(-1)?.status).toBe('error');
+});
+
+it('shows only a bounded provider error code, excluding message and payload data', async () => {
+  const s = scenario(); await s.session.start(); s.connected();
+  s.channel.onmessage?.({ data: JSON.stringify({ type: 'error', error: { code: 'rate_limit_exceeded', message: 'private provider payload' } }) });
+  expect(s.states.at(-1)?.message).toContain('(rate_limit_exceeded)');
+  expect(s.states.at(-1)?.message).not.toContain('private provider payload');
+  expect(s.track.stop).toHaveBeenCalledOnce();
+  await s.session.start(); s.connected();
+  s.channel.onmessage?.({ data: JSON.stringify({ type: 'error', error: { code: 'unsafe arbitrary text' } }) });
+  expect(s.states.at(-1)?.message).toBe('The voice service reported an error. Your microphone is off. Try again.');
+});
+
+it('rejects an overlong history item ID before opening provider transport', async () => {
+  const s = scenario();
+  s.fetchMock.mockResolvedValue(Response.json({ handle: 'b'.repeat(64), conversationId: 'c', sessionMaxSeconds: 2700, context: { itemId: `voxa_context_${'a'.repeat(24)}`, text: 'Synthetic history' } }));
+  await s.session.start(true, 'c'.repeat(64));
+  expect(s.peer.createDataChannel).not.toHaveBeenCalled();
+  expect(s.track.stop).toHaveBeenCalledOnce();
+  expect(s.states.at(-1)?.message).toContain('Saved history could not be loaded');
+});
+
+function emit(s: ReturnType<typeof scenario>, event: object) {
+  s.channel.onmessage?.({ data: JSON.stringify(event) });
+}
+function speech(s: ReturnType<typeof scenario>, text: string, id = 'user_1') {
+  emit(s, { type: 'conversation.item.input_audio_transcription.completed', item_id: id, transcript: text });
+}
+function styleAck(s: ReturnType<typeof scenario>, eagerness: 'low' | 'medium') {
+  emit(s, { type: 'session.updated', session: { audio: { input: { turn_detection: { eagerness } } } } });
+}
+
+it('switches pace between turns, waits for acknowledgment and preserves interruption settings', async () => {
+  const s = scenario(); await s.session.start(); s.connected();
+  emit(s, { type: 'response.created' });
+  emit(s, { type: 'output_audio_buffer.started' });
+  speech(s, 'Mock interview me');
+  expect(s.channel.send).not.toHaveBeenCalled();
+  emit(s, { type: 'response.done' });
+  expect(s.channel.send).not.toHaveBeenCalled();
+  emit(s, { type: 'output_audio_buffer.stopped' });
+  const request = JSON.parse(s.channel.send.mock.calls[0][0]);
+  expect(request).toMatchObject({ type: 'session.update', session: { type: 'realtime', audio: { input: { turn_detection: { type: 'semantic_vad', eagerness: 'low', create_response: true, interrupt_response: true } } } } });
+  expect(s.states.at(-1)?.turnStyle).toBe('everyday');
+  styleAck(s, 'low');
+  expect(s.states.at(-1)?.turnStyle).toBe('thinking');
+  speech(s, 'Mock interview me'); // Duplicate final event cannot change intent or send again.
+  expect(s.channel.send).toHaveBeenCalledOnce();
+  speech(s, "Let's just chat", 'user_2');
+  expect(JSON.parse(s.channel.send.mock.calls[1][0]).session.audio.input.turn_detection.eagerness).toBe('medium');
+  styleAck(s, 'medium');
+  expect(s.states.at(-1)?.turnStyle).toBe('everyday');
+  expect(s.track.stop).not.toHaveBeenCalled();
+});
+
+it('does not update pacing during user speech or from assistant or archive text', async () => {
+  const s = scenario(); await s.session.start(); s.connected();
+  emit(s, { type: 'response.output_audio_transcript.done', item_id: 'assistant', transcript: 'Mock interview me' });
+  emit(s, { type: 'conversation.item.done', item: { id: 'archive', role: 'user', content: [{ type: 'input_text', text: 'Mock interview me' }] } });
+  expect(s.channel.send).not.toHaveBeenCalled();
+  emit(s, { type: 'input_audio_buffer.speech_started' });
+  speech(s, 'Give me more thinking time');
+  expect(s.channel.send).not.toHaveBeenCalled();
+  emit(s, { type: 'input_audio_buffer.speech_stopped' });
+  expect(s.channel.send).toHaveBeenCalledOnce(); styleAck(s, 'low');
+  speech(s, "Let's just chat", 'user_2');
+  expect(s.channel.send).toHaveBeenCalledOnce();
+  expect(s.states.at(-1)?.turnStyleLocked).toBe(true);
+  speech(s, 'Use automatic turn-taking', 'user_3');
+  speech(s, "Let's just chat", 'user_4');
+  expect(s.channel.send).toHaveBeenCalledTimes(2);
+});
+
+it('keeps voice running if a pacing update is rejected or times out, and cleans up on End', async () => {
+  vi.useFakeTimers();
+  const s = scenario(); await s.session.start(); s.connected();
+  speech(s, 'Give me more thinking time');
+  emit(s, { type: 'error', error: { event_id: 'voxa_turn_style_1', code: 'invalid_request_error' } });
+  expect(s.states.at(-1)?.status).toBe('connected');
+  expect(s.states.at(-1)?.turnStyle).toBe('everyday');
+  expect(s.states.at(-1)?.message).toContain('Conversation can continue');
+  emit(s, { type: 'response.done' });
+  expect(s.channel.send).toHaveBeenCalledOnce();
+  speech(s, 'Give me more thinking time', 'user_2');
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(s.states.at(-1)?.status).toBe('connected');
+  expect(s.track.stop).not.toHaveBeenCalled();
+  speech(s, 'Give me more thinking time', 'user_3');
+  s.session.end();
+  const count = s.channel.send.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(6000);
+  expect(s.channel.send).toHaveBeenCalledTimes(count);
+  expect(s.states.at(-1)?.status).toBe('ended');
+});
+
+it('reconciles a delayed pacing acknowledgment and starts fresh after End', async () => {
+  vi.useFakeTimers();
+  const s = scenario(); await s.session.start(); s.connected();
+  speech(s, 'Give me more thinking time');
+  await vi.advanceTimersByTimeAsync(5000);
+  styleAck(s, 'low');
+  expect(s.states.at(-1)?.turnStyle).toBe('thinking');
+  expect(s.channel.send).toHaveBeenCalledOnce();
+  s.session.end(); await s.session.start(); s.connected();
+  expect(s.states.at(-1)?.turnStyle).toBe('everyday');
+  expect(s.states.at(-1)?.turnStyleLocked).toBe(false);
+});
+
+it('keeps a newer intent queued while an older pacing change awaits acknowledgment', async () => {
+  const s = scenario(); await s.session.start(); s.connected();
+  speech(s, 'Give me more thinking time');
+  speech(s, 'Use normal conversation', 'user_2');
+  expect(s.channel.send).toHaveBeenCalledOnce();
+  styleAck(s, 'low');
+  expect(s.channel.send).toHaveBeenCalledTimes(2);
+  styleAck(s, 'medium');
+  expect(s.states.at(-1)?.turnStyle).toBe('everyday');
+  expect(s.states.at(-1)?.turnStyleLocked).toBe(true);
+});
+
+it('ignores a stale rejection from an earlier pacing request', async () => {
+  const s = scenario(); await s.session.start(); s.connected();
+  speech(s, 'Give me more thinking time'); styleAck(s, 'low');
+  speech(s, 'Use normal conversation', 'user_2');
+  emit(s, { type: 'error', error: { event_id: 'voxa_turn_style_1', code: 'invalid_request_error' } });
+  expect(s.states.at(-1)?.status).toBe('connected');
+  styleAck(s, 'medium');
+  expect(s.states.at(-1)?.turnStyle).toBe('everyday');
+});
+
+it('displays drafts without archive reads or pacing changes, then replaces them immediately with final text', async () => {
+  vi.useFakeTimers();
+  const s = scenario(); await s.session.start(); s.connected();
+  const requests = s.fetchMock.mock.calls.length;
+  emit(s, { type: 'conversation.item.input_audio_transcription.delta', item_id: 'u', delta: 'Give me more thinking time' });
+  expect(s.channel.send).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(80);
+  expect(s.captions.at(-1)?.[0]).toMatchObject({ text: 'Give me more thinking time', status: 'draft' });
+  speech(s, '你好，cache 是缓存。', 'u');
+  expect(s.captions.at(-1)?.[0]).toMatchObject({ text: '你好，cache 是缓存。', status: 'final' });
+  expect(s.channel.send).not.toHaveBeenCalled();
+  expect(s.fetchMock).toHaveBeenCalledTimes(requests);
+});
+
+it('marks unfinished captions unconfirmed on End, cancels buffered callbacks and resets on Start', async () => {
+  vi.useFakeTimers();
+  const s = scenario(); await s.session.start(); s.connected();
+  const oldMessage = s.channel.onmessage;
+  emit(s, { type: 'conversation.item.input_audio_transcription.delta', item_id: 'u', delta: 'draft' });
+  s.session.end();
+  expect(s.captions.at(-1)?.[0]).toMatchObject({ text: 'draft', status: 'unconfirmed' });
+  await s.session.start(); s.connected();
+  expect(s.captions.at(-1)).toEqual([]);
+  oldMessage?.({ data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'u', transcript: 'late old final' }) });
+  await vi.advanceTimersByTimeAsync(80);
+  expect(s.captions.at(-1)).toEqual([]);
+});
+
+it('does not gate voice on caption errors and never labels failed partials as final', async () => {
+  const s = scenario(); await s.session.start(); s.connected();
+  emit(s, { type: 'conversation.item.input_audio_transcription.delta', item_id: 'u', delta: 'unfinished' });
+  emit(s, { type: 'conversation.item.input_audio_transcription.failed', item_id: 'u', error: { message: 'private' } });
+  expect(s.captions.at(-1)?.[0]).toMatchObject({ text: 'unfinished', status: 'unconfirmed' });
+  expect(s.states.at(-1)?.status).toBe('connected');
+  expect(s.track.stop).not.toHaveBeenCalled();
+});
+
+it('loads selected summaries on Start before microphone access when background preview is not ready', async () => {
+  const s = scenario(); const preview = deferred<Response>();
+  s.fetchMock.mockImplementation(async url => url === '/api/context/preview' ? preview.promise : url === '/api/session' ? Response.json({ handle: 'b'.repeat(64), conversationId: 'saved', sessionMaxSeconds: 30, context: { itemId: `voxa_context_${'c'.repeat(18)}`, text: 'Synthetic selected insight' } }) : new Response('answer'));
+  const starting = s.session.start(true, undefined, ['chosen']);
+  expect(s.platform.getUserMedia).not.toHaveBeenCalled();
+  expect(s.states.at(-1)?.message).toContain('Loading selected summaries');
+  expect(s.fetchMock).toHaveBeenCalledWith('/api/context/preview', expect.objectContaining({ body: JSON.stringify({ ids: ['chosen'], summariesOnly: true }) }));
+  preview.resolve(Response.json({ token: 'a'.repeat(64), text: 'Synthetic insight', expiresAt: Date.now() + 60000, warnings: [], summariesOnly: true, sessions: [{ id: 'chosen' }], sections: [{ points: [{ text: 'Synthetic insight' }], recentTurns: [] }] }));
+  await starting;
+  expect(s.platform.getUserMedia).toHaveBeenCalledOnce();
+  expect(s.fetchMock).toHaveBeenCalledWith('/api/session', expect.objectContaining({ body: JSON.stringify({ save: true, contextToken: 'a'.repeat(64) }) }));
+});
+
+it('never falls back to a memory-free session if selected-summary setup fails', async () => {
+  const s = scenario(); s.fetchMock.mockResolvedValue(Response.json({ code: 'SUMMARY_PENDING' }, { status: 409 }));
+  await s.session.start(true, undefined, ['chosen']);
+  expect(s.platform.getUserMedia).not.toHaveBeenCalled();
+  expect(s.fetchMock).toHaveBeenCalledOnce();
+  expect(s.states.at(-1)?.status).toBe('error');
+  expect(s.states.at(-1)?.message).toContain('Saved history could not be loaded');
+});
+
+it('cancels a summary-loading Start and ignores late preview results after End', async () => {
+  const s = scenario(); const preview = deferred<Response>(); s.fetchMock.mockReturnValue(preview.promise);
+  const starting = s.session.start(true, undefined, ['chosen']);
+  s.session.end();
+  preview.resolve(Response.json({ token: 'a'.repeat(64) })); await starting;
+  expect(s.platform.getUserMedia).not.toHaveBeenCalled();
+  expect(s.states.at(-1)?.status).toBe('ended');
+});
+
+it('rejects unsolicited history when nothing was selected and releases registered resources', async () => {
+  const s = scenario();
+  s.fetchMock.mockImplementation(async url => url === '/api/session' ? Response.json({ handle: 'b'.repeat(64), conversationId: 'c', sessionMaxSeconds: 2700, context: { itemId: `voxa_context_${'a'.repeat(18)}`, text: 'Unselected archive' } }) : new Response('ok'));
+  await s.session.start(true);
+  expect(s.peer.createDataChannel).not.toHaveBeenCalled();
+  expect(s.track.stop).toHaveBeenCalledOnce();
+  expect(s.states.at(-1)?.status).toBe('error');
+  expect(s.fetchMock).toHaveBeenCalledWith('/api/capture/end', expect.anything());
+});
+
+it.each(['laptop', 'headset'] as const)('sends the chosen %s microphone profile when starting', async microphone => {
+  const s = scenario();
+  await s.session.start(false, undefined, [], microphone);
+  expect(s.fetchMock).toHaveBeenCalledWith('/api/session', expect.objectContaining({ body: JSON.stringify({ save: false, microphone }) }));
+  s.connected();
+  expect(s.states.at(-1)?.status).toBe('connected');
 });
