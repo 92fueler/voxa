@@ -100,17 +100,17 @@ For a selected-memory check, save a short conversation containing a distinctive 
 
 For a bounded saving check, start a new saved session, speak a short bilingual exchange, interrupt one reply, then End. The microphone and playback stop immediately. Saving shows **Finishing final transcript** while the observer accepts late events for up to 12 seconds; the client closes the remaining transport by 15 seconds. Received turns keep saving independently. Refresh Saved conversations and check ordering, final words, interruption markers, and save status. Missing finalization remains incomplete rather than being reported as a complete save. The internal API saving-off exclusion is checked with disposable fixtures; the UI always saves. Do not use a full 45-minute run as the first verification.
 
-Run the backend alone with `make backend`, or the web client with `make frontend`. For focused checks, use `npm --prefix frontend run lint`, `npm --prefix frontend run typecheck`, `npm --prefix frontend test`, `uv run --directory backend --locked pyrefly check`, and `uv run --directory backend --locked pytest -q`. `make build` produces `frontend/dist/` plus Python packages in `backend/dist/`. Restart the backend after Python or environment changes; it does not reload active voice automatically. Use one API process; multiple Uvicorn workers are unsupported while setup handles and context reservations are in memory. The documented launch workflow is the local dev server, not a production deployment.
+Run the backend alone with `make backend`, or the web client with `make web-client`. For focused checks, use `npm --prefix web-client run lint`, `npm --prefix web-client run typecheck`, `npm --prefix web-client test`, `uv run --directory backend --locked pyrefly check`, and `uv run --directory backend --locked pytest -q`. `make build` produces `web-client/dist/` plus Python packages in `backend/dist/`. Restart the backend after Python or environment changes; it does not reload active voice automatically. Use one API process; multiple Uvicorn workers are unsupported while setup handles and context reservations are in memory. The documented launch workflow is the local dev server, not a production deployment.
 
 Pyrefly is configured in `backend/pyproject.toml` to use `backend/.venv/bin/python`, the Python source under `backend/src/`, and `backend/tests/`. Pydantic is a direct Python dependency. `make check` includes the full Pyrefly check. If an editor retains old missing-import diagnostics after the folder move, restart its Python language server or reload the window; select `backend/.venv/bin/python` if it asks for an interpreter. Configuration follows [Pyrefly’s documented interpreter and search-path settings](https://pyrefly.org/en/docs/configuration/).
 
-If your personal npm configuration returns an authentication error for these public packages, try `npm --prefix frontend --userconfig=/dev/null --registry=https://registry.npmjs.org ci`. This does not modify your global npm settings.
+If your personal npm configuration returns an authentication error for these public packages, try `npm --prefix web-client --userconfig=/dev/null --registry=https://registry.npmjs.org ci`. This does not modify your global npm settings.
 
 ## Repository layout
 
 ```text
 voxa/
-├── frontend/              # React/Vite application and npm tooling
+├── web-client/              # React/Vite application and npm tooling
 │   ├── src/               # UI, voice lifecycle, provider adapter and shared types
 │   ├── package.json
 │   └── vite.config.ts

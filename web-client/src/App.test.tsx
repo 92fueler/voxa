@@ -15,5 +15,5 @@ it('does not let an obsolete health response disable a healthy remounted app', a
   await waitFor(() => expect(start.disabled).toBe(false));
   await act(async () => { release(new Response('', { status: 503 })); });
   expect(start.disabled).toBe(false);
-  expect(screen.queryByText('Start the local backend to continue.')).toBeNull();
+  expect(screen.queryByText('Connect to the backend to continue.')).toBeNull();
 });
