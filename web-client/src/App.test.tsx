@@ -17,3 +17,19 @@ it('does not let an obsolete health response disable a healthy remounted app', a
   expect(start.disabled).toBe(false);
   expect(screen.queryByText('Connect to the backend to continue.')).toBeNull();
 });
+
+
+it('shows an explicit hosted sign-in link on 401 and disables voice until authenticated', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('', { status: 401 }))));
+  render(<App />);
+  const link = await screen.findByRole('link', { name: 'Sign in to hosted Voxa' });
+  expect(link.getAttribute('href')).toBe('/api/health');
+  expect((screen.getByRole('button', { name: 'Start conversation' }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it('describes backend storage rather than promising device-local hosted data', async () => {
+  vi.stubGlobal('fetch', vi.fn((url) => Promise.resolve(url === '/api/health' ? Response.json({ realtimeConfigured: true, model: 'synthetic', sessionMaxSeconds: 2700 }) : Response.json([]))));
+  render(<App />);
+  await waitFor(() => expect((screen.getByRole('button', { name: 'Start conversation' }) as HTMLButtonElement).disabled).toBe(false));
+  expect(screen.getByText(/A hosted backend stores it on that server/)).toBeTruthy();
+});

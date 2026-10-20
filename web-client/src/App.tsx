@@ -21,6 +21,7 @@ export function App() {
   const [voice, setVoice] = useState<VoiceState>(initialVoiceState);
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
   const [checking, setChecking] = useState(true);
   const [liveTurns, setLiveTurns] = useState<LiveTurn[]>([]);
   const [microphone, setMicrophone] = useState<MicrophoneProfile>('laptop');
@@ -28,7 +29,7 @@ export function App() {
 
   const checkBackend = useCallback((signal?: AbortSignal) => {
     return fetch('/api/health', { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000) })
-      .then(async response => { if (!response.ok) throw new Error('Unavailable'); return await response.json() as Health; })
+      .then(async response => { if (!signal?.aborted) setAuthRequired(response.status === 401); if (!response.ok) throw new Error('Unavailable'); return await response.json() as Health; })
       .then(value => { if (!signal?.aborted) { setHealth(value); setHealthError(false); } })
       .catch(() => { if (!signal?.aborted) { setHealth(null); setHealthError(true); } })
       .finally(() => { if (!signal?.aborted) setChecking(false); });
@@ -90,6 +91,7 @@ export function App() {
 
       {(!health?.realtimeConfigured || healthError) && <aside className="setup-note" aria-label="Connection setup">
         <span className="setup-number">01</span><div><strong>{checking ? 'Checking your backend connection…' : healthError ? 'Connect to the backend to continue.' : 'One small setup step before we talk.'}</strong>
+          {authRequired && <p><a href="/api/health" target="_blank" rel="noreferrer">Sign in to hosted Voxa</a>, then return here and choose Check again. Credentials are handled by your browser, not stored in this app.</p>}
           <p>{healthError ? 'For local development, run make dev from the repo. For a hosted app, check server availability and sign in, then check again.' : 'Add your OpenAI API key to the backend/.env file, restart the app, and check again. Your key stays on the backend, never in this web client.'}</p></div>
         <button className="text-button" onClick={() => { setChecking(true); setHealthError(false); void checkBackend(); }} disabled={checking}>{checking ? 'Checking…' : 'Check again'}<span aria-hidden="true">↗</span></button>
       </aside>}

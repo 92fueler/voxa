@@ -1,0 +1,6 @@
+# Optional native development ONLY. Never combine with compose.production.yaml.
+# Starts only PostgreSQL; make dev still runs web/API natively with hot reload.
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:54329:5432"

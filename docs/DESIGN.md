@@ -4,6 +4,12 @@ Status: current implementation reviewed against source on October 18, 2026. The 
 
 Original research and pricing baseline: October 16, 2026. Product targets and future features are labeled below; implementation descriptions reflect the October 18 source review. Published pricing examples are historical research inputs, not a refreshed quote or measured app cost.
 
+### October 20 infrastructure increment
+
+The repository is now split into `web-client/`, `ios-client/` and `backend/`. The web voice flow remains the implemented client; iOS is an Expo/TypeScript scaffold, not device-verified voice. PostgreSQL is the primary shared database for local Compose and hosted use, with versioned migrations and an explicit non-destructive SQLite import. The native local workflow retains SQLite compatibility and loopback binding. The storage interface preserves transcript, category, summary and 30-day expiry behavior; pgvector readiness does not add embedding generation or retrieval.
+
+AWS Lightsail and HTTPS Compose are deployment scaffolds only. Production requires configured single-user authentication and exact trusted Host/Origin, and remains one API process because call handles and previews are in memory. No multi-user authorization, horizontal scaling, provisioning or deployment is implied. See DATABASE.md and DEPLOYMENT.md for migration, security, backup and unverified operational boundaries. Earlier local-only architecture descriptions below document the pre-cloud baseline where not superseded here.
+
 ### Current implementation boundary
 
 - Local-only browser/API on 127.0.0.1:4317/4318; Python 3.12+ with uv, Node.js 22.13+ with npm, root Makefile orchestration, one API process.

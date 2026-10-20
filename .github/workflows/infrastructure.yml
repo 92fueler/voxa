@@ -1,0 +1,106 @@
+name: Infrastructure scaffold checks
+
+on:
+  pull_request:
+    paths:
+      - "compose*.yaml"
+      - ".dockerignore"
+      - ".env.example"
+      - "infrastructure/**"
+      - "backend/**"
+      - "web-client/**"
+      - ".github/workflows/infrastructure.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infrastructure/lightsail
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
+      # No AWS credentials, Terraform plan/apply, or paid provisioning in CI.
+
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Synthetic, public test fixtures. Never use real credentials in PR jobs.
+      POSTGRES_PASSWORD: "1111111111111111111111111111111111111111111111111111111111111111"
+      VOXA_DB_PASSWORD: "2222222222222222222222222222222222222222222222222222222222222222"
+      VOXA_AUTH_PASSWORD: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      VOXA_AUTH_USERNAME: fixture
+      VOXA_PUBLIC_ORIGIN: https://voxa.example.com
+      ACME_EMAIL: fixture@example.com
+      OPENAI_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate standalone Compose configurations
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.yaml -f compose.dev.yaml config --quiet
+          OPENAI_API_KEY=synthetic-not-a-provider-key docker compose -f compose.production.yaml config --quiet
+      - name: Build locked backend and web images
+        run: docker compose build
+      - name: Validate Caddy configurations without serving or issuing certificates
+        run: |
+          docker compose run --rm --no-deps web caddy validate --config /etc/caddy/Caddyfile
+          docker compose run --rm --no-deps \
+            -e VOXA_PUBLIC_ORIGIN -e ACME_EMAIL \
+            -v "$PWD/infrastructure/caddy/Caddyfile.production:/etc/caddy/Caddyfile:ro" \
+            web caddy validate --config /etc/caddy/Caddyfile
+      - name: Start isolated local stack without provider credentials
+        run: docker compose up -d --wait --wait-timeout 120
+      - name: Check loopback web, API, schema and extension
+        run: |
+          curl --fail --silent http://127.0.0.1:4317/ > /dev/null
+          curl --fail --silent http://127.0.0.1:4318/healthz > /dev/null
+          curl --fail --silent http://127.0.0.1:4317/api/health > /dev/null
+          docker compose exec -T postgres psql -U postgres -d voxa \
+            -v ON_ERROR_STOP=1 -tAc "SELECT extversion FROM pg_extension WHERE extname='vector'" | grep -E '^0\.'
+          docker compose exec -T postgres psql -U postgres -d voxa \
+            -v ON_ERROR_STOP=1 -tAc "SELECT rolsuper FROM pg_roles WHERE rolname='voxa'" | grep -x f
+          docker compose exec -T backend voxa-db status
+      - name: Check production startup and auth against synthetic PostgreSQL
+        run: |
+          # Do not run two API processes against the archive even during this check.
+          docker compose stop backend
+          docker compose run --rm -T --no-deps \
+            -e VOXA_ENV=production -e VOXA_PUBLIC_ORIGIN \
+            -e VOXA_AUTH_USERNAME -e VOXA_AUTH_PASSWORD backend python - <<'PY'
+          import asyncio
+          import os
+          import httpx
+          from src.app import create_app
+
+          async def check():
+              app = create_app()
+              auth = (os.environ["VOXA_AUTH_USERNAME"], os.environ["VOXA_AUTH_PASSWORD"])
+              async with app.router.lifespan_context(app):
+                  async with httpx.AsyncClient(
+                      transport=httpx.ASGITransport(app=app),
+                      base_url=os.environ["VOXA_PUBLIC_ORIGIN"],
+                      trust_env=False,
+                  ) as client:
+                      assert (await client.get("/api/health")).status_code == 401
+                      assert (await client.get("/api/health", auth=auth)).status_code == 200
+                      assert (await client.get("/api/health", auth=("fixture", "wrong"))).status_code == 401
+                      assert (await client.get("/api/health", auth=auth, headers={"Origin": "https://evil.example"})).status_code == 403
+                      assert (await client.get("/api/health", auth=auth, headers={"Host": "evil.example"})).status_code == 403
+                      response = await client.get("/healthz")
+                      assert response.status_code == 200 and response.json() == {"status": "ok"}
+              print("Production startup, PostgreSQL, auth and origin checks passed.")
+
+          asyncio.run(check())
+          PY
+      - name: Remove disposable CI containers and synthetic database only
+        if: always()
+        run: docker compose down --volumes

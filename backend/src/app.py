@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import secrets
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Annotated
@@ -26,6 +27,24 @@ INSTRUCTIONS = "You are Voxa, a personal voice learning companion. Speak natural
 
 def error(status, message, code=None):
     return JSONResponse({"error": message, **({"code": code} if code else {})}, status_code=status)
+
+
+def authenticated(request: Request, config: Config) -> bool:
+    """Compare only bounded, valid Basic credentials; never log or echo the header."""
+    values = request.headers.getlist("authorization")
+    if len(values) != 1 or len(values[0]) > 2048:
+        return False
+    scheme, separator, encoded = values[0].partition(" ")
+    if not separator or scheme.lower() != "basic":
+        return False
+    try:
+        value = base64.b64decode(encoded, validate=True)
+    except ValueError:
+        return False
+    username, separator, password = value.partition(b":")
+    username_matches = secrets.compare_digest(username, config.auth_username.encode("utf-8"))
+    password_matches = secrets.compare_digest(password, config.auth_password.encode("utf-8"))
+    return bool(separator) and username_matches and password_matches
 
 
 class StrictBody(BaseModel):
@@ -88,7 +107,11 @@ def create_app(
     setup_timeout=10,
 ):
     config = config or Config.from_env()
-    store = store if store is not None else ConversationStore(config.database_path)
+    store = (
+        store
+        if store is not None
+        else ConversationStore(config.database_path, database_url=config.database_url or None)
+    )
     client = client if client is not None else httpx.AsyncClient(trust_env=False, follow_redirects=False)
     voice = voice_provider or create_provider(config.voice_provider, config, client)
     summary = summary_provider or create_provider(config.summary_provider, config, client)
@@ -106,10 +129,24 @@ def create_app(
             cleanup.push_async_callback(store.close)
             cleanup.push_async_callback(captures.close)
             cleanup.push_async_callback(summaries.close)
+            if config.environment == "production":
+                try:
+                    async with asyncio.timeout(15):
+                        await store.run("health")
+                except Exception:
+                    # DB exceptions may include connection details; fail closed without disclosing them.
+                    raise RuntimeError("Production conversation storage is unavailable.") from None
             summaries.start()
             yield
 
-    app = FastAPI(title="Voxa API", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(
+        title="Voxa API",
+        version="0.2.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.store, app.state.captures, app.state.previews, app.state.summaries = (
         store,
         captures,
@@ -118,11 +155,28 @@ def create_app(
     )
 
     @app.middleware("http")
-    async def local_only(request: Request, call_next):
-        if request.headers.get("host") not in {"127.0.0.1:4318", "localhost:4318"} or request.headers.get(
-            "origin"
-        ) not in {None, "http://127.0.0.1:4317", "http://localhost:4317"}:
-            result = error(403, "This development API is available only from the local Voxa app.")
+    async def request_boundary(request: Request, call_next):
+        hosts, origins = request.headers.getlist("host"), request.headers.getlist("origin")
+        fetch_sites = request.headers.getlist("sec-fetch-site")
+        if (
+            len(hosts) != 1
+            or hosts[0] not in config.trusted_hosts
+            or len(origins) > 1
+            or (origins and origins[0] not in config.trusted_origins)
+            or (
+                config.environment == "production"
+                and (len(fetch_sites) > 1 or (fetch_sites and fetch_sites[0] not in {"same-origin", "none"}))
+            )
+        ):
+            # Never trust client IP or forwarded headers for an auth/Host/Origin exemption.
+            result = error(403, "This request is not from an allowed Voxa origin.")
+        elif (
+            config.environment == "production"
+            and request.url.path != "/healthz"
+            and not authenticated(request, config)
+        ):
+            result = error(401, "Authentication required.", "AUTH_REQUIRED")
+            result.headers["WWW-Authenticate"] = 'Basic realm="Voxa", charset="UTF-8"'
         else:
             limit = (
                 128000
@@ -143,14 +197,21 @@ def create_app(
                 try:
                     result = await call_next(request)
                 except Exception:
-                    result = error(503, "The local service is temporarily unavailable.")
+                    result = error(503, "The service is temporarily unavailable.")
         result.headers["Cache-Control"] = "no-store"
+        result.headers["X-Content-Type-Options"] = "nosniff"
+        result.headers["Referrer-Policy"] = "no-referrer"
         return result
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
         # Never echo invalid request inputs, SDP or credentials in validation responses.
         return error(400, "Invalid request.")
+
+    @app.get("/healthz")
+    async def liveness():
+        # Liveness only. Provider configuration and archive content require authenticated /api access.
+        return {"status": "ok"}
 
     @app.get("/api/health")
     async def health():
@@ -176,7 +237,7 @@ def create_app(
                 if token:
                     context = await previews.take(token)
                 instructions = INSTRUCTIONS + (
-                    " The Voxa app saves this session’s text locally for 30 days and prepares a background summary after End. Only conversations explicitly selected by the user are provided as background when available. Use them only when relevant to the current request."
+                    " The Voxa app saves this session’s text in its configured archive for 30 days and prepares a background summary after End. Only conversations explicitly selected by the user are provided as background when available. Use them only when relevant to the current request."
                     if body.save
                     else " Transcript saving is off for this session: no new durable transcript or summary is created. Only explicitly selected saved history may be provided as background."
                 )

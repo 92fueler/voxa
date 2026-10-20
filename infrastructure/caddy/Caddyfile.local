@@ -1,0 +1,22 @@
+{
+	admin off
+	auto_https off
+}
+
+:4317 {
+	@api path /api /api/*
+	handle @api {
+		# Preserve incoming Host so the API can validate the local origin.
+		reverse_proxy backend:4318
+	}
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# Container-only liveness, deliberately not published by Compose.
+:2015 {
+	respond /healthz "ok" 200
+}

@@ -1,0 +1,10 @@
+# Examples only. Verify availability, costs, account, and all values before planning.
+# Copy to terraform.tfvars (ignored). Do not put application secrets in this file.
+aws_region        = "us-east-1"
+availability_zone = "us-east-1a"
+name              = "voxa"
+blueprint_id      = "ubuntu_24_04"
+bundle_id         = "REPLACE_WITH_REVIEWED_BUNDLE_ID"
+key_pair_name     = "REPLACE_WITH_EXISTING_LIGHTSAIL_KEY"
+ssh_admin_cidr    = "203.0.113.10/32" # Documentation IP: replace with your public IP.
+disk_size_gb      = 32
