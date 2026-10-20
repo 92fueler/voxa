@@ -2,11 +2,21 @@
 
 import os
 import uuid
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import psycopg
 import pytest
 from psycopg import sql
+
+
+def schema_database_url(url, schema):
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query))
+    query["options"] = query.get("options", "") + f" -c search_path={schema},public"
+    # libpq URI decoding understands %20, not form-encoded '+' for spaces.
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query, quote_via=quote), parts.fragment)
+    )
 
 
 @pytest.fixture
@@ -17,10 +27,7 @@ def postgres_url():
     schema = "voxa_test_" + uuid.uuid4().hex
     with psycopg.connect(url, autocommit=True) as connection:
         connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-    parts = urlsplit(url)
-    query = dict(parse_qsl(parts.query))
-    query["options"] = query.get("options", "") + f" -c search_path={schema},public"
-    isolated = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    isolated = schema_database_url(url, schema)
     try:
         yield isolated
     finally:
