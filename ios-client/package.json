@@ -1,0 +1,30 @@
+{
+  "name": "voxa-ios-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.ts",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "expo start --localhost",
+    "ios": "expo start --ios --localhost",
+    "ios:native": "expo run:ios",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/*.test.ts",
+    "check": "npm run typecheck && npm test",
+    "export:ios": "expo export --platform ios"
+  },
+  "dependencies": {
+    "expo": "58.0.16",
+    "react": "19.3.0",
+    "react-native": "0.88.0",
+    "react-native-safe-area-context": "5.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
+    "typescript": "6.0.3"
+  }
+}

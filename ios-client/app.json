@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "Voxa",
+    "slug": "voxa-ios-client",
+    "version": "0.1.0",
+    "platforms": ["ios"],
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.voxa",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    }
+  }
+}

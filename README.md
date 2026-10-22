@@ -4,7 +4,29 @@ Personal voice learning companion with audio input and spoken responses.
 
 The local voice MVP includes automatic background transcript saving and a saved-conversation viewer. Voice sessions require an OpenAI API key. New sessions start without saved memory unless you select conversation summaries in Saved conversations. Learning modes and automatic reconnection/rollover remain planned. Detailed live acceptance checks remain tracked in `docs/PLANS.md`.
 
-## Run locally
+## Clients, database and deployment
+
+- `web-client/`: the existing React/Vite voice application (formerly `frontend/`).
+- `ios-client/`: an Expo + React Native TypeScript starter with backend connectivity checks. Voice transport, microphone lifecycle, background audio and device acceptance are future work, not a completed iOS voice app.
+- `backend/`: one Python/FastAPI process shared by clients. PostgreSQL is the primary shared/local-container and hosted database; pgvector is available in the database image for future embeddings, with no embedding/retrieval feature added.
+- `infrastructure/`: AWS Lightsail infrastructure scaffolding. This change does not provision or deploy anything.
+
+### Local shared stack (no AWS required)
+
+Install Docker with Compose, copy `.env.example` to `.env`, choose separate local database administrator and application passwords, then run `make local`. Open http://127.0.0.1:4317. PostgreSQL is private to Compose and persists in a named volume. `make local-down` stops the stack without deleting volumes. Never use `docker compose down -v` on an archive you want to keep.
+
+See [database migrations and SQLite import](docs/DATABASE.md) before switching existing data, and [deployment, backups and recovery](docs/DEPLOYMENT.md) for the reviewed Lightsail path. Setting DATABASE_URL chooses PostgreSQL; it does not copy existing SQLite data. Keep the original archive and an independently verified backup until import and restore checks pass. The existing 30-day transcript expiry still applies after import; backups require their own retention policy.
+
+For the optional native client, run `make install-ios` then `make ios-client`; see [the iOS starter README](ios-client/README.md). `make install-all` and `make check-all` include both clients and the backend.
+
+### Native local development with PostgreSQL
+
+For editable web development against the shared database, copy/configure the root `.env` as above, then run `make database-dev`. This opt-in override publishes PostgreSQL only on `127.0.0.1:54329`, avoiding the usual 5432 port. Set `DATABASE_URL=postgresql://voxa:YOUR_VOXA_DB_PASSWORD@127.0.0.1:54329/voxa` in `backend/.env` using the same hexadecimal application password from the root `.env`, then run `make install` and `make dev`. The Vite client hot reloads; restart the API after backend changes. Do not run `make local` at the same time because it uses the same web/API ports. Stop the database without removing its volume with `docker compose -f compose.yaml -f compose.dev.yaml down`.
+
+Do not combine `compose.dev.yaml` with production, bind this port to a public interface, or use production credentials for development. `make database` starts the private container-only database; `make database-dev` is the explicit native-access variant.
+
+### Native local development (legacy SQLite compatibility)
+
 
 Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 22.13+ and npm. The local Python selection is 3.13; SQLite uses Python’s standard library. The backend is FastAPI; React/Vite remains TypeScript.
 
@@ -38,7 +60,7 @@ This display uses the existing transcription model and turn detection, with no e
 
 ## Saved conversations
 
-Transcripts are saved automatically; there is no saving checkbox. Storage, memory and API-usage details are available under **Privacy & memory** in the footer, keeping the voice controls uncluttered. Saved sessions enable separate input transcription, which has additional API usage charges. Completed user/assistant transcript events are written incrementally to `backend/data/conversations.sqlite` by a dedicated SQLite worker thread; storage retries and status polling do not gate spoken responses. No raw audio is recorded.
+Transcripts are saved automatically; there is no saving checkbox. Storage, memory and API-usage details are available under **Privacy & memory** in the footer, keeping the voice controls uncluttered. Saved sessions enable separate input transcription, which has additional API usage charges. Completed user/assistant transcript events are written incrementally to the configured backend database by a dedicated storage worker (PostgreSQL for the shared stack, `backend/data/conversations.sqlite` for legacy native local development); storage retries and status polling do not gate spoken responses. No raw audio is recorded.
 
 Open **Saved conversations** and use **Refresh** to browse the latest saved turns. The list shows concise conversation titles, dates and saved-turn counts grouped by category. Titles are generated automatically together with the background summary after final transcript saving. Existing untitled ended conversations are prepared automatically too (additional API usage); there is no title button. Until a title is ready, a short opening excerpt provides an immediate label. Titles match the conversation’s main language and can still contain model mistakes. Use **+ Category** to add a category, the **···** menu beside its heading to rename or remove it, and the category selector in a conversation’s detail view to move it. Removing a category keeps its conversations in **Uncategorized**.
 
@@ -100,20 +122,24 @@ For a selected-memory check, save a short conversation containing a distinctive 
 
 For a bounded saving check, start a new saved session, speak a short bilingual exchange, interrupt one reply, then End. The microphone and playback stop immediately. Saving shows **Finishing final transcript** while the observer accepts late events for up to 12 seconds; the client closes the remaining transport by 15 seconds. Received turns keep saving independently. Refresh Saved conversations and check ordering, final words, interruption markers, and save status. Missing finalization remains incomplete rather than being reported as a complete save. The internal API saving-off exclusion is checked with disposable fixtures; the UI always saves. Do not use a full 45-minute run as the first verification.
 
-Run the backend alone with `make backend`, or the web client with `make frontend`. For focused checks, use `npm --prefix frontend run lint`, `npm --prefix frontend run typecheck`, `npm --prefix frontend test`, `uv run --directory backend --locked pyrefly check`, and `uv run --directory backend --locked pytest -q`. `make build` produces `frontend/dist/` plus Python packages in `backend/dist/`. Restart the backend after Python or environment changes; it does not reload active voice automatically. Use one API process; multiple Uvicorn workers are unsupported while setup handles and context reservations are in memory. The documented launch workflow is the local dev server, not a production deployment.
+Run the backend alone with `make backend`, or the web client with `make web-client`. For focused checks, use `npm --prefix web-client run lint`, `npm --prefix web-client run typecheck`, `npm --prefix web-client test`, `uv run --directory backend --locked pyrefly check`, and `uv run --directory backend --locked pytest -q`. `make build` produces `web-client/dist/` plus Python packages in `backend/dist/`. Restart the backend after Python or environment changes; it does not reload active voice automatically. Use one API process; multiple Uvicorn workers are unsupported while setup handles and context reservations are in memory. The native launch workflow is the local dev server. Production uses the separate authenticated HTTPS Compose scaffold described in docs/DEPLOYMENT.md; it is not a verified deployed service.
 
 Pyrefly is configured in `backend/pyproject.toml` to use `backend/.venv/bin/python`, the Python source under `backend/src/`, and `backend/tests/`. Pydantic is a direct Python dependency. `make check` includes the full Pyrefly check. If an editor retains old missing-import diagnostics after the folder move, restart its Python language server or reload the window; select `backend/.venv/bin/python` if it asks for an interpreter. Configuration follows [Pyrefly’s documented interpreter and search-path settings](https://pyrefly.org/en/docs/configuration/).
 
-If your personal npm configuration returns an authentication error for these public packages, try `npm --prefix frontend --userconfig=/dev/null --registry=https://registry.npmjs.org ci`. This does not modify your global npm settings.
+If your personal npm configuration returns an authentication error for these public packages, try `npm --prefix web-client --userconfig=/dev/null --registry=https://registry.npmjs.org ci`. This does not modify your global npm settings.
 
 ## Repository layout
 
 ```text
 voxa/
-├── frontend/              # React/Vite application and npm tooling
+├── web-client/              # React/Vite application and npm tooling
 │   ├── src/               # UI, voice lifecycle, provider adapter and shared types
 │   ├── package.json
 │   └── vite.config.ts
+├── ios-client/            # Expo/React Native TypeScript starter
+├── infrastructure/                 # Lightsail Terraform and deployment configuration
+├── compose.yaml           # Local shared PostgreSQL stack
+├── compose.production.yaml # Explicit HTTPS production stack
 ├── backend/               # Python project and uv tooling
 │   ├── src/               # API, services, storage, providers and integrations
 │   ├── tests/

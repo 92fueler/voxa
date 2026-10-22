@@ -1,0 +1,30 @@
+{
+	admin off
+	email {$ACME_EMAIL}
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$VOXA_PUBLIC_ORIGIN} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
+	@api path /api /api/*
+	handle @api {
+		# Preserve Host and Authorization. Uvicorn ignores forwarded headers.
+		reverse_proxy backend:4318
+	}
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# Container-only liveness. No API metadata or authentication bypass.
+:2015 {
+	respond /healthz "ok" 200
+}

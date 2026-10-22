@@ -1,4 +1,4 @@
-"""Schema-v4-compatible SQLite repository; every operation runs on one dedicated worker."""
+"""Shared archive repository with PostgreSQL and legacy SQLite worker backends."""
 
 import asyncio
 import json
@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .config import ROOT
+from .postgres import STORE_LOCK, PostgresDatabase
 from .util import encode, now_ms
 
 FIELDS = """id,started_at AS startedAt,ended_at AS endedAt,incomplete,revision,issues,category_id AS categoryId,
@@ -16,6 +17,14 @@ FIELDS = """id,started_at AS startedAt,ended_at AS endedAt,incomplete,revision,i
 (SELECT substr(trim(json_extract(value,'$.text')),1,80) FROM turns WHERE conversation_id=conversations.id
 AND json_extract(value,'$.speaker')='user' AND json_extract(value,'$.status')='completed' AND json_extract(value,'$.orderKnown')=1
 AND trim(json_extract(value,'$.text'))<>'' ORDER BY json_extract(value,'$.previousItemId') IS NULL DESC,json_extract(value,'$.createdAt'),item_id LIMIT 1) AS previewText"""
+POSTGRES_FIELDS = """id,started_at AS "startedAt",ended_at AS "endedAt",incomplete,revision,issues,category_id AS "categoryId",
+(SELECT COUNT(*) FROM turns WHERE conversation_id=conversations.id) AS "turnCount",
+(SELECT value::jsonb->>'title' FROM summaries WHERE conversation_id=conversations.id AND source_revision=conversations.revision AND status='ready') AS title,
+(SELECT status FROM summaries WHERE conversation_id=conversations.id AND source_revision=conversations.revision) AS "summaryStatus",
+(SELECT substr(trim(value::jsonb->>'text'),1,80) FROM turns WHERE conversation_id=conversations.id
+AND value::jsonb->>'speaker'='user' AND value::jsonb->>'status'='completed' AND value::jsonb->>'orderKnown' IN ('true','1')
+AND trim(value::jsonb->>'text')<>'' ORDER BY (value::jsonb->>'previousItemId') IS NULL DESC,(value::jsonb->>'createdAt')::bigint,item_id LIMIT 1) AS "previewText"
+"""
 ISSUES = {
     "observer_unavailable",
     "observer_disconnected",
@@ -28,9 +37,17 @@ ISSUES = {
 
 
 class ConversationStore:
-    def __init__(self, path=None):
-        self.path = Path(path) if path is not None else ROOT / "data/conversations.sqlite"
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="voxa-sqlite")
+    def __init__(self, path=None, *, database_url=None):
+        target = database_url or (str(path) if path is not None else "")
+        self.postgres = target.startswith(("postgresql://", "postgres://"))
+        if database_url and not self.postgres:
+            raise ValueError("DATABASE_URL must use PostgreSQL.")
+        self.database_url = target if self.postgres else None
+        self.path = (
+            None if self.postgres else Path(path) if path is not None else ROOT / "data/conversations.sqlite"
+        )
+        self.fields = POSTGRES_FIELDS if self.postgres else FIELDS
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="voxa-store")
         self.db = None
         self.closed = False
         self.pending = 0
@@ -46,7 +63,7 @@ class ConversationStore:
 
             def completed(result):
                 self.pending -= 1
-                # A timed-out caller must not cancel a queued SQLite operation or hide its exception.
+                # A timed-out caller must not cancel a queued storage operation or hide its exception.
                 if not result.cancelled():
                     result.exception()
 
@@ -58,6 +75,10 @@ class ConversationStore:
     def _database(self):
         if self.db:
             return self.db
+        if self.postgres:
+            self.db = PostgresDatabase(self.database_url)
+            return self.db
+        assert self.path is not None
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         db = sqlite3.connect(self.path, timeout=0.1, isolation_level=None)
         db.row_factory = sqlite3.Row
@@ -101,7 +122,7 @@ class ConversationStore:
 
     def _detail(self, db, item_id):
         row = db.execute(
-            f"SELECT {FIELDS} FROM conversations WHERE id=? AND deleted=0", (item_id,)
+            f"SELECT {self.fields} FROM conversations WHERE id=? AND deleted=0", (item_id,)
         ).fetchone()
         if not row:
             return None
@@ -112,7 +133,7 @@ class ConversationStore:
             for t in db.execute("SELECT value FROM turns WHERE conversation_id=?", (item_id,))
         ]
         summary = db.execute(
-            "SELECT source_revision AS sourceRevision,status,value FROM summaries WHERE conversation_id=?",
+            'SELECT source_revision AS "sourceRevision",status,value FROM summaries WHERE conversation_id=?',
             (item_id,),
         ).fetchone()
         row["summary"] = (
@@ -133,6 +154,9 @@ class ConversationStore:
         ).fetchall():
             self._remove(db, row[0])
 
+    def _title(self, field):
+        return f"({field}::jsonb->>'title')" if self.postgres else f"json_extract({field},'$.title')"
+
     def _schedule(self, db, item_id, force=False, require_title=False):
         row = db.execute(
             "SELECT revision,ended_at FROM conversations WHERE id=? AND deleted=0", (item_id,)
@@ -144,28 +168,43 @@ class ConversationStore:
         ):
             return
         db.execute(
-            """INSERT INTO summaries(conversation_id,source_revision,status) VALUES (?,?,'pending')
+            f"""INSERT INTO summaries(conversation_id,source_revision,status) VALUES (?,?,'pending')
         ON CONFLICT(conversation_id) DO UPDATE SET source_revision=excluded.source_revision,status='pending',value=NULL,attempts=0,available_at=0,lease_until=0,claim_token=NULL
-        WHERE summaries.source_revision<>excluded.source_revision OR (? AND summaries.status='failed') OR (? AND summaries.status='ready' AND (json_extract(summaries.value,'$.title') IS NULL OR trim(json_extract(summaries.value,'$.title'))=''))""",
+        WHERE summaries.source_revision<>excluded.source_revision OR (? AND summaries.status='failed') OR (? AND summaries.status='ready' AND ({self._title("summaries.value")} IS NULL OR trim({self._title("summaries.value")})=''))""",
             (item_id, row["revision"], force, require_title),
         )
 
     def _run(self, operation, p):
         db = self._database()
-        db.execute("BEGIN IMMEDIATE" if operation not in ("list", "get", "categories") else "BEGIN")
         try:
+            db.execute(
+                "BEGIN" if self.postgres or operation in ("list", "get", "categories") else "BEGIN IMMEDIATE"
+            )
+            if self.postgres:
+                db.execute("SELECT pg_advisory_xact_lock(?)", (STORE_LOCK,))
             value = self._operate(db, operation, p)
             db.execute("COMMIT")
             return value
-        except BaseException:
-            db.execute("ROLLBACK")
+        except BaseException as error:
+            try:
+                db.execute("ROLLBACK")
+            except Exception:
+                if self.postgres:
+                    db.close()
+                    self.db = None
+            if isinstance(db, PostgresDatabase) and db.discard_after(error):
+                self.db = None
+            # Never replay an uncertain write. A subsequent operation may reconnect.
             raise
 
     def _operate(self, d, op, p):
         item_id = p.get("id")
-        if op == "create":
+        if op == "health":
+            return {"ok": True}
+        elif op == "create":
             d.execute(
-                "INSERT OR IGNORE INTO conversations(id,started_at) VALUES (?,?)", (item_id, p["startedAt"])
+                "INSERT INTO conversations(id,started_at) VALUES (?,?) ON CONFLICT(id) DO NOTHING",
+                (item_id, p["startedAt"]),
             )
         elif op == "turn":
             turn = p["turn"]
@@ -186,8 +225,8 @@ class ConversationStore:
                 self._schedule(d, item_id)
         elif op == "finish":
             d.execute(
-                "UPDATE conversations SET ended_at=COALESCE(ended_at,?),incomplete=MAX(incomplete,?) WHERE id=? AND deleted=0",
-                (p["endedAt"], bool(p.get("incomplete")), item_id),
+                f"UPDATE conversations SET ended_at=COALESCE(ended_at,?),incomplete={'GREATEST' if self.postgres else 'MAX'}(incomplete,?) WHERE id=? AND deleted=0",
+                (p["endedAt"], int(bool(p.get("incomplete"))), item_id),
             )
             self._schedule(d, item_id)
         elif op == "incomplete":
@@ -212,15 +251,15 @@ class ConversationStore:
             return [
                 {**dict(r), "issues": json.loads(r["issues"])}
                 for r in d.execute(
-                    f"SELECT {FIELDS} FROM conversations WHERE deleted=0 ORDER BY started_at DESC LIMIT 100"
+                    f"SELECT {self.fields} FROM conversations WHERE deleted=0 ORDER BY started_at DESC LIMIT 100"
                 )
             ]
         elif op == "delete":
             self._remove(d, item_id)
         elif op == "summary-backfill":
             self._expire(d)
-            rows = d.execute("""SELECT c.id FROM conversations c LEFT JOIN summaries s ON s.conversation_id=c.id WHERE c.deleted=0 AND c.ended_at IS NOT NULL AND EXISTS(SELECT 1 FROM turns WHERE conversation_id=c.id)
-            AND (s.conversation_id IS NULL OR s.source_revision<>c.revision OR (s.status='ready' AND (json_extract(s.value,'$.title') IS NULL OR trim(json_extract(s.value,'$.title'))='')))
+            rows = d.execute(f"""SELECT c.id FROM conversations c LEFT JOIN summaries s ON s.conversation_id=c.id WHERE c.deleted=0 AND c.ended_at IS NOT NULL AND EXISTS(SELECT 1 FROM turns WHERE conversation_id=c.id)
+            AND (s.conversation_id IS NULL OR s.source_revision<>c.revision OR (s.status='ready' AND ({self._title("s.value")} IS NULL OR trim({self._title("s.value")})='')))
             ORDER BY c.started_at DESC LIMIT 100""").fetchall()
             for row in rows:
                 self._schedule(d, row[0], require_title=True)
@@ -264,7 +303,8 @@ class ConversationStore:
                 (p["now"] + 30000, item_id, p["claimToken"]),
             )
         elif op == "categories":
-            return [dict(r) for r in d.execute("SELECT id,name FROM categories ORDER BY name COLLATE NOCASE")]
+            order = 'lower(name COLLATE "C")' if self.postgres else "name COLLATE NOCASE"
+            return [dict(r) for r in d.execute(f"SELECT id,name FROM categories ORDER BY {order}")]
         elif op == "category-create":
             if d.execute("SELECT COUNT(*) FROM categories").fetchone()[0] >= 50:
                 raise ValueError("Category limit")

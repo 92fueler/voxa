@@ -21,6 +21,7 @@ export function App() {
   const [voice, setVoice] = useState<VoiceState>(initialVoiceState);
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
   const [checking, setChecking] = useState(true);
   const [liveTurns, setLiveTurns] = useState<LiveTurn[]>([]);
   const [microphone, setMicrophone] = useState<MicrophoneProfile>('laptop');
@@ -28,7 +29,7 @@ export function App() {
 
   const checkBackend = useCallback((signal?: AbortSignal) => {
     return fetch('/api/health', { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000) })
-      .then(async response => { if (!response.ok) throw new Error('Unavailable'); return await response.json() as Health; })
+      .then(async response => { if (!signal?.aborted) setAuthRequired(response.status === 401); if (!response.ok) throw new Error('Unavailable'); return await response.json() as Health; })
       .then(value => { if (!signal?.aborted) { setHealth(value); setHealthError(false); } })
       .catch(() => { if (!signal?.aborted) { setHealth(null); setHealthError(true); } })
       .finally(() => { if (!signal?.aborted) setChecking(false); });
@@ -82,15 +83,16 @@ export function App() {
           {!active ? <button className="button primary" disabled={!canStart} onClick={startConversation}><MicIcon />Start conversation</button>
             : <><button className="button secondary" disabled={voice.status !== 'connected'} aria-pressed={voice.muted} onClick={() => session.current?.toggleMute()}><MicIcon muted={voice.muted} />{voice.muted ? 'Unmute' : 'Mute'}</button><button className="button end" onClick={() => session.current?.end()}><span className="stop-icon" />End session</button></>}
         </div>
-        {saving.state !== 'off' && <p className={`save-status ${saving.state}`} role="status">{saving.state === 'saving' ? 'Saving transcript…' : saving.state === 'finalizing' ? 'Finishing final transcript… Microphone is off.' : saving.state === 'saved' ? 'Received turns saved locally' : saving.state === 'delayed' ? 'Saving delayed. Conversation can continue.' : 'Capture incomplete. Some turns may not be saved.'}</p>}
+        {saving.state !== 'off' && <p className={`save-status ${saving.state}`} role="status">{saving.state === 'saving' ? 'Saving transcript…' : saving.state === 'finalizing' ? 'Finishing final transcript… Microphone is off.' : saving.state === 'saved' ? 'Received turns saved' : saving.state === 'delayed' ? 'Saving delayed. Conversation can continue.' : 'Capture incomplete. Some turns may not be saved.'}</p>}
         {voice.status === 'connected' && voice.turnStyle && <p className="save-status" role="status">{voice.turnStyle === 'thinking' ? 'Thinking pace · more time to speak' : 'Everyday pace'}{voice.turnStyleLocked ? ' · voice override' : ' · automatic'}</p>}
         <LiveTranscriptView turns={liveTurns} />
         <audio ref={audio} autoPlay />
       </section>
 
       {(!health?.realtimeConfigured || healthError) && <aside className="setup-note" aria-label="Connection setup">
-        <span className="setup-number">01</span><div><strong>{checking ? 'Checking your local connection…' : healthError ? 'Start the local backend to continue.' : 'One small setup step before we talk.'}</strong>
-          <p>{healthError ? 'Run make dev from the repo, then check again.' : 'Add your OpenAI API key to the backend/.env file, restart the app, and check again. Your key stays on your computer’s backend.'}</p></div>
+        <span className="setup-number">01</span><div><strong>{checking ? 'Checking your backend connection…' : healthError ? 'Connect to the backend to continue.' : 'One small setup step before we talk.'}</strong>
+          {authRequired && <p><a href="/api/health" target="_blank" rel="noreferrer">Sign in to hosted Voxa</a>, then return here and choose Check again. Credentials are handled by your browser, not stored in this app.</p>}
+          <p>{healthError ? 'For local development, run make dev from the repo. For a hosted app, check server availability and sign in, then check again.' : 'Add your OpenAI API key to the backend/.env file, restart the app, and check again. Your key stays on the backend, never in this web client.'}</p></div>
         <button className="text-button" onClick={() => { setChecking(true); setHealthError(false); void checkBackend(); }} disabled={checking}>{checking ? 'Checking…' : 'Check again'}<span aria-hidden="true">↗</span></button>
       </aside>}
 
@@ -107,9 +109,9 @@ export function App() {
     </main>
     <footer><span>A conversation, at your pace.</span>
       <details className="privacy-details"><summary>Privacy &amp; memory</summary><div>
-        <p>Conversation text is saved on this computer for 30 days. No audio recordings are stored. You can delete saved conversations at any time.</p>
+        <p>Conversation text is saved in the configured backend database for 30 days. A hosted backend stores it on that server, not this device. No audio recordings are stored. You can delete saved conversations at any time.</p>
         <p>New conversations use only summaries you explicitly select in Saved conversations before Start. Nothing is selected by default. Titles and summaries are prepared after final saving and use the OpenAI API.</p>
       </div></details>
-      <span>{health ? `${health.sessionMaxSeconds / 60}-minute session limit` : 'Local prototype'}</span></footer>
+      <span>{health ? `${health.sessionMaxSeconds / 60}-minute session limit` : 'Voice companion'}</span></footer>
   </div>;
 }

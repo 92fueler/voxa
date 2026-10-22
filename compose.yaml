@@ -1,0 +1,81 @@
+# Local-only containers. Run separately from make dev: both use 4317/4318.
+# This file is not a production base; never merge it into the production file.
+name: voxa-local
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: voxa
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      VOXA_DB_PASSWORD: ${VOXA_DB_PASSWORD:?Set VOXA_DB_PASSWORD in .env}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/01-init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d voxa"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    stop_grace_period: 60s
+    logging: *logging
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      VOXA_ENV: local-container
+      DATABASE_URL: postgresql://voxa:${VOXA_DB_PASSWORD:?Set VOXA_DB_PASSWORD in .env}@postgres:5432/voxa
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      REALTIME_MODEL: ${REALTIME_MODEL:-gpt-realtime-2.1}
+      SUMMARY_MODEL: ${SUMMARY_MODEL:-gpt-5.6-terra}
+      SESSION_MAX_SECONDS: ${SESSION_MAX_SECONDS:-2700}
+    ports:
+      - "127.0.0.1:4318:4318"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 45s
+    logging: *logging
+
+  web:
+    build:
+      context: .
+      dockerfile: web-client/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4317:4317"
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging: *logging
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

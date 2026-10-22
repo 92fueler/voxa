@@ -14,3 +14,13 @@ __pycache__/
 .ruff_cache/
 *.pyc
 *.egg-info/
+
+
+# Infrastructure state and local tooling outputs
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+.expo/

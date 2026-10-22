@@ -1,0 +1,104 @@
+# Standalone production candidate, NOT an override of compose.yaml.
+# Use only after the review and acceptance gates in docs/DEPLOYMENT.md.
+name: voxa-production
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: voxa
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      VOXA_DB_PASSWORD: ${VOXA_DB_PASSWORD:?Set VOXA_DB_PASSWORD in .env}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - type: bind
+        source: /srv/voxa/postgres
+        target: /var/lib/postgresql/data
+        bind:
+          create_host_path: false
+      - ./infrastructure/postgres/01-init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+    networks: [database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d voxa"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    stop_grace_period: 60s
+    logging: *logging
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      VOXA_ENV: production
+      VOXA_PUBLIC_ORIGIN: ${VOXA_PUBLIC_ORIGIN:?Set VOXA_PUBLIC_ORIGIN in .env}
+      VOXA_AUTH_USERNAME: ${VOXA_AUTH_USERNAME:?Set VOXA_AUTH_USERNAME in .env}
+      VOXA_AUTH_PASSWORD: ${VOXA_AUTH_PASSWORD:?Set VOXA_AUTH_PASSWORD in .env}
+      DATABASE_URL: postgresql://voxa:${VOXA_DB_PASSWORD:?Set VOXA_DB_PASSWORD in .env}@postgres:5432/voxa
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
+      REALTIME_MODEL: ${REALTIME_MODEL:-gpt-realtime-2.1}
+      SUMMARY_MODEL: ${SUMMARY_MODEL:-gpt-5.6-terra}
+      SESSION_MAX_SECONDS: ${SESSION_MAX_SECONDS:-2700}
+    # No published API port. Caddy is the only inbound path.
+    networks: [database, edge]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 45s
+    logging: *logging
+
+  web:
+    build:
+      context: .
+      dockerfile: web-client/Dockerfile
+    restart: unless-stopped
+    environment:
+      VOXA_PUBLIC_ORIGIN: ${VOXA_PUBLIC_ORIGIN:?Set VOXA_PUBLIC_ORIGIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infrastructure/caddy/Caddyfile.production:/etc/caddy/Caddyfile:ro
+      - type: bind
+        source: /srv/voxa/caddy-data
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/voxa/caddy-config
+        target: /config
+        bind:
+          create_host_path: false
+    networks: [edge]
+    depends_on:
+      backend:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    logging: *logging
+
+networks:
+  edge:
+  database:
+    internal: true
