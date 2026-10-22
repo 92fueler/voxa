@@ -85,7 +85,7 @@ export function App() {
         </div>
         {saving.state !== 'off' && <p className={`save-status ${saving.state}`} role="status">{saving.state === 'saving' ? 'Saving transcript…' : saving.state === 'finalizing' ? 'Finishing final transcript… Microphone is off.' : saving.state === 'saved' ? 'Received turns saved' : saving.state === 'delayed' ? 'Saving delayed. Conversation can continue.' : 'Capture incomplete. Some turns may not be saved.'}</p>}
         {voice.status === 'connected' && voice.turnStyle && <p className="save-status" role="status">{voice.turnStyle === 'thinking' ? 'Thinking pace · more time to speak' : 'Everyday pace'}{voice.turnStyleLocked ? ' · voice override' : ' · automatic'}</p>}
-        <LiveTranscriptView turns={liveTurns} />
+        {active && <LiveTranscriptView turns={liveTurns} />}
         <audio ref={audio} autoPlay />
       </section>
 

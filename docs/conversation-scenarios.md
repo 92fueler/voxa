@@ -102,7 +102,19 @@ Expected: the next call uses the selected profile without editing configuration 
 
 Using disposable synthetic sources, prepare a category with ready ended summaries and an empty conversation. Select the category, unselect one ready source, review Selected insights, then Start. Separately clear all sources and start fresh. For the selected run, ask about a distinctive fact supported by an included point; also ask about an unselected source.
 
-Expected: bulk selection checks ready sources and visibly explains exclusions; only selected summary points load, with no transcript fallback or automatic latest-three context. Context too large for every source to contribute blocks setup with a clear error. Start remains stable while previews load; early Start validates selection before acquiring the microphone. No-selection startup supplies no archive. Failure: unselected content appears, a source is silently omitted from the packet, or a preview failure silently starts without selected memory. Repeated checkbox edits must not exhaust unused-preview capacity; actual spoken recall remains a separate provider/listening check.
+Expected: bulk selection checks ready sources and visibly explains exclusions; only selected summary points load, with no transcript fallback or automatic latest-three context. Context too large for every source to contribute blocks setup with a clear error. With synthetic empty-summary and oversized-selection fixtures, confirm the error lists each affected title/date and distinguishes empty insights from a combined size limit. Unselect one affected source directly from the error: other choices stay checked and reload automatically; no saved conversation is deleted. Clearing or changing selection must hide a late error from the old request. Start remains stable while previews load; early Start validates selection before acquiring the microphone. No-selection startup supplies no archive. Failure: unselected content appears, a source is silently omitted from the packet, or a preview failure silently starts without selected memory. Repeated checkbox edits must not exhaust unused-preview capacity; actual spoken recall remains a separate provider/listening check.
+
+### C07 — Live-caption lifecycle at End and failure
+
+During a disposable short call, observe a provisional caption, then End before its final result arrives. Repeat with a connection failure or short configured session expiry. Inspect the saved conversation after finalization; start a fresh call separately.
+
+Expected: the live-caption panel disappears immediately when voice becomes inactive. Saving/finalizing/incomplete status remains independent, and the Saved conversations entry stays available. Late caption callbacks cannot resurrect the ended panel. A fresh call starts without old captions; late backend finals, when received, appear in its original saved transcript. Failure: “Live transcript” remains visible long after End, old captions reappear at the next Start, or unconfirmed text is fabricated into an apparently accurate post-call transcript.
+
+### C08 — Both speakers in live captions
+
+Ask a short question in English/Mandarin, watch the user final and Voxa’s response stream, then interrupt a reply. Also test an assistant answer containing a pacing-command phrase such as “give me more thinking time” as quoted content.
+
+Expected: one Live transcript panel labels You and Voxa, assembles deltas separately by item/content index, and replaces them with exact final text without duplicate turns. Assistant text may appear ahead of speech; an interrupted reply retains an interruption warning even after its final text arrives. A late final for an older response must not mark a newer reply interrupted. Assistant text never changes pacing. End still removes both speakers’ live text. Failure: assistant text is missing, mixed into the user caption, triggers a pacing override, or is presented as exactly heard/saved speech.
 
 ## Additional modes
 

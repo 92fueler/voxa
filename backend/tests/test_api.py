@@ -297,6 +297,7 @@ async def test_summary_only_selection_rejects_empty_ready_insights(system):
     empty = await seed(app.state.store, ready=True)
     response = await client.post("/api/context/preview", json={"ids": [empty], "summariesOnly": True})
     assert response.status_code == 409 and response.json()["code"] == "NO_CONTEXT"
+    assert response.json()["sourceIds"] == [empty]
     assert not provider.created and not provider.summary_calls
 
 
@@ -355,3 +356,105 @@ async def test_invalid_microphone_profile_rejected_before_provider(system, micro
     response = await client.post("/api/session", json={"microphone": microphone})
     assert response.status_code == 400
     assert not provider.created
+
+
+async def test_preview_identifies_all_empty_summaries_without_blaming_usable_sources(system):
+    app, client, provider = system
+    empty_ids = [await seed(app.state.store, ready=True) for _ in range(2)]
+    good = await seed(app.state.store, text="PRIVATE_RAW_TRANSCRIPT")
+    await app.state.summaries.tick()
+    calls = len(provider.summary_calls)
+    response = await client.post(
+        "/api/context/preview", json={"ids": [good, *empty_ids], "summariesOnly": True}
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "NO_CONTEXT"
+    assert response.json()["sourceIds"] == empty_ids
+    assert "PRIVATE_RAW_TRANSCRIPT" not in response.text
+    assert not app.state.previews.entries
+    assert len(provider.summary_calls) == calls
+    retry = await client.post("/api/context/preview", json={"ids": [good], "summariesOnly": True})
+    assert retry.status_code == 200
+
+
+async def test_preview_budget_failure_identifies_sources_that_fit_individually(system, monkeypatch):
+    app, client, provider = system
+
+    async def summarize(*args):
+        return {
+            "title": "Synthetic topic",
+            "titleSourceTurnIds": ["u"],
+            "points": [{"kind": "topic", "text": "中" * 230, "sourceTurnIds": ["u"]}],
+        }
+
+    monkeypatch.setattr(provider, "summarize", summarize)
+    ids = []
+    for _ in range(8):
+        ids.append(await seed(app.state.store))
+        await app.state.summaries.tick()
+    response = await client.post("/api/context/preview", json={"ids": ids, "summariesOnly": True})
+    assert response.status_code == 409
+    result = response.json()
+    assert result["code"] == "CONTEXT_LIMIT"
+    assert result["sourceIds"] and set(result["sourceIds"]) < set(ids)
+    assert "fit alongside" in result["error"]
+    assert not app.state.previews.entries
+    alone = await client.post(
+        "/api/context/preview", json={"ids": [result["sourceIds"][0]], "summariesOnly": True}
+    )
+    assert alone.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "problem,expected,status,provider_status",
+    [
+        (ProviderError("PROVIDER_REJECTED", upstream_status=400), "PROVIDER_REJECTED", 502, 400),
+        (ProviderError("PROVIDER_AUTH_FAILED", upstream_status=401), "PROVIDER_AUTH_FAILED", 502, 401),
+        (ProviderError("PROVIDER_TIMEOUT"), "PROVIDER_TIMEOUT", 504, None),
+        (TimeoutError("PRIVATE"), "PROVIDER_TIMEOUT", 504, None),
+        (RuntimeError("PRIVATE"), "CALL_SETUP_FAILED", 502, None),
+        (ProviderError("PRIVATE", upstream_status=999), "CALL_SETUP_FAILED", 502, None),
+    ],
+)
+async def test_call_failure_is_actionable_private_and_finishes_capture(
+    system, monkeypatch, caplog, problem, expected, status, provider_status
+):
+    app, client, provider = system
+
+    async def fail(*args):
+        raise problem
+
+    monkeypatch.setattr(provider, "connect_call", fail)
+    data = (await client.post("/api/session", json={"save": True})).json()
+    response = await client.post("/api/call", json={"handle": data["handle"], "sdp": "PRIVATE SDP"})
+    assert response.status_code == status
+    assert response.json() == {
+        "error": "The voice provider could not connect the call. Try again.",
+        "code": expected,
+        **({"providerStatus": provider_status} if provider_status else {}),
+    }
+    assert "PRIVATE" not in response.text and "PRIVATE" not in caplog.text
+    assert data["handle"] not in caplog.text
+    assert "call_setup_failed" in caplog.text and expected in caplog.text
+    assert not provider.observers
+    assert (await client.post("/api/capture/status", json={"handle": data["handle"]})).json()[
+        "state"
+    ] == "finalizing"
+    assert (await client.post("/api/call", json={"handle": data["handle"], "sdp": "offer"})).json()[
+        "code"
+    ] == "SESSION_SETUP_EXPIRED"
+
+
+@pytest.mark.parametrize("upstream,expected", [(400, 400), (401, 401), (True, None), (999, None)])
+async def test_session_creation_preserves_only_valid_provider_status(system, upstream, expected):
+    _, client, provider = system
+    provider.create_error = ProviderError("PROVIDER_REJECTED", upstream_status=upstream)
+    assert provider.create_error.upstream_status == expected
+    response = await client.post("/api/session", json={"save": True})
+    assert response.status_code == 502
+    assert response.json() == {
+        "error": "The voice provider could not create the session. Try again.",
+        "code": "PROVIDER_REJECTED",
+        **({"providerStatus": expected} if expected is not None else {}),
+    }
+    assert not provider.observers

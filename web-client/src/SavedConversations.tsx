@@ -8,6 +8,9 @@ import { CategoryManager, CategoryMenu } from './CategoryManager';
 import { ConversationSummary } from './ConversationSummary';
 interface Conversation { previewText?: string | null; title?: string | null; summaryStatus?: 'pending' | 'running' | 'ready' | 'failed' | null; id: string; startedAt: number; endedAt: number | null; incomplete: number; revision: number; turnCount: number; issues: string[]; categoryId?: string | null }
 interface Detail extends Conversation { turns: SavedTurn[]; summary?: SummaryRecord | null }
+function conversationDate(startedAt: number): string {
+  return new Date(startedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
 function memoryUnavailable(item: Conversation): string | null {
   if (!item.turnCount) return 'No saved turns';
   if (!item.endedAt) return 'Conversation still active';
@@ -135,7 +138,13 @@ export function SavedConversations({ active, conversationId, memory }: { active:
           {memory.preview?.sections.map((section, index) => <div key={memory.preview!.sessions[index].id}><strong>{list.find(item => item.id === memory.preview!.sessions[index].id)?.title || 'Selected conversation'}</strong><ul>{section.points.map((point, n) => <li key={n}>{point.text}</li>)}</ul></div>)}
           {memory.preview?.warnings.map((warning, index) => <p key={index}>{warning}</p>)}
         </div></details></div>
-        {memory.error && <span className="memory-error" role="alert">{memory.error} <button className="text-button" disabled={active} onClick={memory.retry}>Retry</button></span>}
+        {memory.error && <div className="memory-error" role="alert"><p>{memory.error} <button className="text-button" disabled={active} onClick={memory.retry}>Retry</button></p>
+          {memory.errorSourceIds.length > 0 && <ul className="memory-error-sources">{memory.errorSourceIds.map(id => {
+            const source = list.find(item => item.id === id);
+            const title = source ? source.title || source.previewText || 'New conversation' : `Selected conversation ${memory.selected.indexOf(id) + 1}`;
+            return <li key={id}><span>{title}{source && <small>{conversationDate(source.startedAt)}</small>}</span><button className="text-button" aria-label={`Unselect ${title}`} disabled={active} onClick={() => memory.select(memory.selected.filter(value => value !== id))}>Unselect</button></li>;
+          })}</ul>}
+        </div>}
       </div>}
       {error && <p role="alert">{error}</p>}
       {busy && <p role="status">Loading…</p>}
@@ -155,7 +164,7 @@ export function SavedConversations({ active, conversationId, memory }: { active:
         </div></div>
         {group.conversations.map(item => <div className="history-entry" key={item.id}><div className="history-row">
           <div className="history-row-main"><button className="text-button" onClick={() => navigate(item.id)}>{item.title || item.previewText || 'New conversation'}</button>
-            <p>{new Date(item.startedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} · {item.turnCount} {item.turnCount === 1 ? 'turn' : 'turns'}</p>
+            <p>{conversationDate(item.startedAt)} · {item.turnCount} {item.turnCount === 1 ? 'turn' : 'turns'}</p>
             {memory && memoryUnavailable(item) && <p id={`memory-reason-${item.id}`} className="memory-row-reason">{memoryUnavailable(item)}</p>}
             {memory && !!item.endedAt && !!item.turnCount && (item.summaryStatus === 'failed' || !item.summaryStatus) && <p className="memory-pending"><button className="text-button" disabled={active || busy} onClick={() => void prepareSummary(item.id)}>Prepare summary (API usage)</button></p>}</div>
           <div className="history-row-actions">{memoryChoice(item)}<ConversationActions title={item.title || item.previewText || 'New conversation'} disabled={busy} onDelete={() => setDeleteTarget(item)} /></div>

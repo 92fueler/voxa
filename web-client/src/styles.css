@@ -65,6 +65,12 @@ footer { min-height: 65px; border-top: 1px solid #dfe3d8; display: flex; align-i
 .history-memory-actions.is-empty { visibility: hidden; pointer-events: none; }
 .history-memory-actions .text-button { font-size: 10px; margin: 0; padding: 4px 0; }
 .memory-error { grid-column: 1/-1; color: #87503a; }
+.memory-error > p { margin: 0; }
+.memory-error-sources { list-style: none; margin: 6px 0 0; padding: 0; max-height: 180px; overflow-y: auto; }
+.memory-error-sources li { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 4px 8px; border-left: 2px solid #b7866f; }
+.memory-error-sources span { overflow-wrap: anywhere; }
+.memory-error-sources small { display: block; margin-top: 2px; color: #77836d; font-size: 10px; }
+.memory-error-sources .text-button { margin: 0; padding: 8px; }
 .selected-insights { position: relative; }
 .selected-insights summary { cursor: pointer; white-space: nowrap; }
 .selected-insights-body { position: absolute; right: 0; top: calc(100% + 8px); width: 340px; max-width: calc(100vw - 64px); height: 180px; overflow-y: auto; z-index: 6; padding: 12px; background: #faf9f3; border: 1px solid #d7ddce; border-radius: 8px; box-shadow: 0 6px 20px #243d3414; font-size: 11px; line-height: 1.6; }
@@ -139,8 +145,9 @@ footer { min-height: 65px; border-top: 1px solid #dfe3d8; display: flex; align-i
 .live-transcript ol { list-style: none; padding: 0; margin: 0; max-height: 240px; overflow-y: auto; }
 .live-transcript li { border-top: 1px solid #dfe3d7; padding: 8px 0; }
 .live-transcript li p { font-size: 13px; line-height: 1.6; margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.live-transcript-turn-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 11px; }
 .caption-state { font-size: 10px; color: #526b42; }
-.caption-state.draft, .caption-state.unconfirmed { color: #87503a; }
+.caption-state.draft, .caption-state.unconfirmed, .caption-state.interrupted { color: #87503a; }
 @media (max-width: 540px) {
   .history-panel { --memory-col: 88px; --actions-col: 44px; --row-gap: 6px; padding: 10px; }
   .history-heading { gap: 8px; }

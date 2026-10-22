@@ -560,3 +560,67 @@ it.each(['laptop', 'headset'] as const)('sends the chosen %s microphone profile 
   s.connected();
   expect(s.states.at(-1)?.status).toBe('connected');
 });
+
+it('streams Voxa captions without changing pace, fetching transcripts or claiming interrupted output was heard', async () => {
+  vi.useFakeTimers();
+  const s = scenario(); await s.session.start(); s.connected();
+  const reads = s.fetchMock.mock.calls.length;
+  emit(s, { type: 'response.output_audio_transcript.delta', response_id: 'r', item_id: 'a', delta: 'Mock interview me' });
+  await vi.advanceTimersByTimeAsync(80);
+  expect(s.captions.at(-1)?.[0]).toMatchObject({ speaker: 'assistant', text: 'Mock interview me', status: 'draft' });
+  emit(s, { type: 'response.output_audio_transcript.done', response_id: 'r', item_id: 'a', transcript: 'Give me more thinking time' });
+  expect(s.captions.at(-1)?.[0]).toMatchObject({ speaker: 'assistant', text: 'Give me more thinking time', status: 'final' });
+  expect(s.channel.send).not.toHaveBeenCalled();
+  expect(s.fetchMock).toHaveBeenCalledTimes(reads);
+  emit(s, { type: 'output_audio_buffer.cleared', response_id: 'r' });
+  expect(s.captions.at(-1)?.[0].status).toBe('interrupted');
+  expect(s.states.at(-1)?.status).toBe('connected');
+  expect(s.track.stop).not.toHaveBeenCalled();
+});
+
+
+it.each([
+  ['PROVIDER_TIMEOUT', undefined, 'timed out'],
+  ['PROVIDER_AUTH_FAILED', 401, 'authentication'],
+  ['PROVIDER_QUOTA_EXCEEDED', 429, 'quota'],
+  ['PROVIDER_RATE_LIMITED', 429, 'rate limited'],
+  ['PROVIDER_MODEL_UNAVAILABLE', 404, 'model is unavailable'],
+  ['PROVIDER_UNAVAILABLE', undefined, 'could not reach'],
+  ['SESSION_SETUP_EXPIRED', undefined, 'setup expired'],
+  ['PROVIDER_REJECTED', 400, 'provider HTTP 400'],
+  ['PRIVATE', 'PRIVATE', 'service rejected'],
+  ['toString', undefined, 'service rejected'],
+])('reports %s during call setup and releases resources without retrying', async (code, providerStatus, message) => {
+  const s = scenario();
+  s.fetchMock.mockImplementation(async url => url === '/api/session'
+    ? Response.json({ handle: 'a'.repeat(64), conversationId: 'synthetic', sessionMaxSeconds: 2700 })
+    : url === '/api/call' ? Response.json({ code, providerStatus, error: 'PRIVATE' }, { status: 502 }) : Response.json({ ok: true }));
+  await s.session.start(true);
+  expect(s.states.at(-1)?.status).toBe('error');
+  expect(s.states.at(-1)?.message).toContain(message);
+  expect(s.states.at(-1)?.message).not.toContain('PRIVATE');
+  expect(s.fetchMock.mock.calls.filter(([url]) => url === '/api/call')).toHaveLength(1);
+  expect(s.track.stop).toHaveBeenCalledOnce();
+  expect(s.peer.close).toHaveBeenCalledOnce();
+  expect(s.fetchMock).toHaveBeenCalledWith('/api/capture/end', expect.anything());
+});
+
+
+it.each([
+  ['PROVIDER_TIMEOUT', 'timed out'],
+  ['PROVIDER_AUTH_FAILED', 'authentication'],
+  ['PROVIDER_QUOTA_EXCEEDED', 'quota'],
+  ['PROVIDER_RATE_LIMITED', 'rate limited'],
+  ['PROVIDER_MODEL_UNAVAILABLE', 'model is unavailable'],
+  ['PROVIDER_UNAVAILABLE', 'could not reach'],
+  ['AUTH_REQUIRED', 'Sign in'],
+])('explains %s even when credential creation fails before SDP exchange', async (code, message) => {
+  const s = scenario();
+  s.fetchMock.mockResolvedValueOnce(Response.json({ code, error: 'PRIVATE' }, { status: 502 }));
+  await s.session.start(true);
+  expect(s.states.at(-1)?.message).toContain(message);
+  expect(s.states.at(-1)?.message).not.toContain('PRIVATE');
+  expect(s.fetchMock).toHaveBeenCalledTimes(1);
+  expect(s.track.stop).toHaveBeenCalledOnce();
+  expect(s.peer.createDataChannel).not.toHaveBeenCalled();
+});

@@ -206,3 +206,39 @@ it('uses the headset filter for the next call without losing selected memory', a
   fireEvent.click(startButton());
   expect(s.start).toHaveBeenLastCalledWith(true, undefined, ['one'], 'laptop');
 });
+
+it.each([
+  ['NO_CONTEXT', 'The listed conversations have no usable summary insights. Unselect them to continue.'],
+  ['CONTEXT_LIMIT', 'The listed summaries could not fit alongside your other selections. Select fewer conversations.'],
+])('names the affected conversation for %s and unselects only it', async (code, error) => {
+  const s = setup(); await openHistory();
+  s.fetchMock.mockImplementation(async (url, init) => {
+    if (url !== '/api/context/preview') throw new Error('Unexpected archive/model request');
+    const ids = JSON.parse(String(init?.body)).ids as string[];
+    return ids.includes('two') ? Response.json({ code, error, sourceIds: ['two', 'unselected', 'two', null] }, { status: 409 }) : Response.json(packet(ids));
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Select all ready in BQ' }));
+  const unselect = await screen.findByRole('button', { name: 'Unselect Conversation 2' });
+  const alert = screen.getByRole('alert');
+  expect(alert.textContent).toContain('Conversation 2');
+  expect(alert.textContent).not.toContain('Conversation 1');
+  expect(screen.getAllByRole('button', { name: /^Unselect / })).toHaveLength(1);
+  expect(checkbox(2).checked).toBe(true);
+  fireEvent.click(unselect);
+  expect(checkbox(2).checked).toBe(false);
+  for (const n of [1, 3, 4]) expect(checkbox(n).checked).toBe(true);
+  await screen.findByText(/3 selected for next conversation.*ready/);
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(s.fetchMock).toHaveBeenCalledWith('/api/context/preview', expect.objectContaining({ body: JSON.stringify({ ids: ['one', 'three', 'four'], summariesOnly: true }) }));
+});
+
+it('does not show an outdated source error after its selection was cleared', async () => {
+  const s = setup(); await openHistory();
+  let release!: (response: Response) => void;
+  s.fetchMock.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+  fireEvent.click(checkbox(1)); await waitFor(() => expect(release).toBeTypeOf('function'));
+  fireEvent.click(checkbox(1));
+  release(Response.json({ code: 'NO_CONTEXT', error: 'Old selection error', sourceIds: ['one'] }, { status: 409 }));
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  expect(screen.queryByRole('button', { name: /^Unselect / })).toBeNull();
+});

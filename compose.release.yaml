@@ -1,0 +1,9 @@
+# Used only by infrastructure/bin/voxa-ops.py after validation.
+# Base build definitions remain available for CI; deployment uses --no-build.
+services:
+  postgres:
+    image: ${VOXA_POSTGRES_IMAGE:?Set reviewed immutable PostgreSQL image}
+  backend:
+    image: ${VOXA_BACKEND_IMAGE:?Set reviewed immutable backend image}
+  web:
+    image: ${VOXA_WEB_IMAGE:?Set reviewed immutable web image}

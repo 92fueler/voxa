@@ -1,0 +1,12 @@
+{
+  "region": "us-east-2",
+  "account_id": "044986459337",
+  "origin": "https://voxa.lakechabotlabs.ai",
+  "data_uuid": "REPLACE_WITH_VERIFIED_EXT4_UUID",
+  "bucket": "REPLACE_WITH_PRIVATE_LIGHTSAIL_BUCKET",
+  "backup_prefix": "voxa/postgres",
+  "age_recipient": "REPLACE_WITH_AGE_PUBLIC_RECIPIENT",
+  "postgres_image": "pgvector/pgvector@sha256:REPLACE_WITH_REVIEWED_AMD64_DIGEST",
+  "backend_image": "REPLACE_WITH_REVIEWED_BACKEND_IMAGE@sha256:DIGEST",
+  "web_image": "REPLACE_WITH_REVIEWED_WEB_IMAGE@sha256:DIGEST"
+}

@@ -8,8 +8,11 @@ MicrophoneProfile = Literal["laptop", "headset"]
 
 
 class ProviderError(Exception):
-    def __init__(self, code="PROVIDER_UNAVAILABLE", status=502):
+    def __init__(self, code="PROVIDER_UNAVAILABLE", status=502, *, upstream_status=None):
         self.code, self.status = code, status
+        self.upstream_status = (
+            upstream_status if type(upstream_status) is int and 400 <= upstream_status <= 599 else None
+        )
         super().__init__(code)
 
 

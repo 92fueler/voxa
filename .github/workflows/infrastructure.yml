@@ -16,6 +16,16 @@ permissions:
   contents: read
 
 jobs:
+  operations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m unittest discover -s infrastructure/tests -v
+      - run: python -m py_compile infrastructure/bin/*.py
+
   terraform:
     runs-on: ubuntu-latest
     defaults:
@@ -69,6 +79,10 @@ jobs:
           docker compose exec -T postgres psql -U postgres -d voxa \
             -v ON_ERROR_STOP=1 -tAc "SELECT rolsuper FROM pg_roles WHERE rolname='voxa'" | grep -x f
           docker compose exec -T backend voxa-db status
+      - name: Verify synthetic isolated database recovery (no AWS or real keys)
+        run: |
+          export VOXA_TEST_POSTGRES_IMAGE="$(docker image inspect pgvector/pgvector:0.8.7-pg17-bookworm --format '{{index .RepoDigests 0}}')"
+          python -m unittest discover -s infrastructure/tests -p test_restore_docker.py -v
       - name: Check production startup and auth against synthetic PostgreSQL
         run: |
           # Do not run two API processes against the archive even during this check.

@@ -95,14 +95,17 @@ async def test_invalid_provider_credentials(payload):
         assert exc.value.code == "INVALID_CREDENTIAL"
 
 
-@pytest.mark.parametrize("status", [401, 429, 500])
-async def test_provider_errors_do_not_expose_private_bodies(status):
+@pytest.mark.parametrize(
+    "status,code", [(401, "PROVIDER_AUTH_FAILED"), (429, "PROVIDER_RATE_LIMITED"), (500, "PROVIDER_REJECTED")]
+)
+async def test_provider_errors_do_not_expose_private_bodies(status, code):
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda r: httpx.Response(status, text="PRIVATE"))
     ) as client:
         with pytest.raises(ProviderError) as exc:
             await OpenAIProvider(Config(), client).create_session(False, "instructions")
-        assert exc.value.code == "PROVIDER_REJECTED" and "PRIVATE" not in str(exc.value)
+        assert exc.value.code == code and exc.value.upstream_status == status
+        assert "PRIVATE" not in str(exc.value)
 
 
 @pytest.mark.parametrize(
@@ -313,3 +316,26 @@ def test_application_loads_backend_environment_file(tmp_path, monkeypatch):
     main.application()
     assert captured[0].api_key == "fixture-from-env"
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+
+@pytest.mark.parametrize(
+    "status,payload,code",
+    [
+        (429, {"error": {"code": "insufficient_quota", "message": "PRIVATE"}}, "PROVIDER_QUOTA_EXCEEDED"),
+        (404, {"error": {"code": "model_not_found", "message": "PRIVATE"}}, "PROVIDER_MODEL_UNAVAILABLE"),
+        (400, {"error": {"code": "PRIVATE", "message": "PRIVATE"}}, "PROVIDER_REJECTED"),
+        (403, [], "PROVIDER_AUTH_FAILED"),
+        (400, {"error": ["PRIVATE"]}, "PROVIDER_REJECTED"),
+    ],
+)
+async def test_call_rejections_keep_only_sanitized_categories(status, payload, code):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(status, json=payload))
+    ) as client:
+        with pytest.raises(ProviderError) as exc:
+            await OpenAIProvider(Config(), client).connect_call(
+                VoiceCredential("ek_fixture", time.time() + 60), "PRIVATE SDP"
+            )
+        assert exc.value.code == code
+        assert exc.value.upstream_status == status
+        assert "PRIVATE" not in str(exc.value)

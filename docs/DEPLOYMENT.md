@@ -2,6 +2,8 @@
 
 This is a **single-user deployment scaffold**, not a deployed or production-accepted service. Nothing here provisions AWS resources automatically. No real credentials, transcripts, certificates, or Terraform state belong in Git. A draft PR does not authorize `terraform apply`, DNS changes, server setup, or paid provider tests.
 
+For the repeatable immutable-release, UUID storage and encrypted scheduled-backup workflow, use [OPERATIONS.md](OPERATIONS.md). Its operations commands supersede the manual release/backup examples below; the architecture and acceptance boundaries still apply.
+
 ## Boundaries
 
 - `make dev` remains a loopback-only native development path, with `backend/.env`.

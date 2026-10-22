@@ -5,6 +5,7 @@ import { isExpectedCleanupError } from '../shared/realtime-errors';
 /** Browser transport adapter. A new vendor wire format implements this interface. */
 export interface RealtimeEvent {
   caption?: CaptionEvent;
+  interruption?: { responseId?: string; itemId?: string };
   contextItemId?: string; inputActive?: boolean; failed?: boolean; errorCode?: string;
   userTranscript?: { id: string; text: string }; responseActive?: boolean; outputActive?: boolean;
   acknowledgedStyle?: TurnStyle; styleRejected?: string;
@@ -21,6 +22,18 @@ export interface RealtimeProtocol {
   directCall(value: string, sdp?: string): { url: string; body?: string; headers: Record<string, string> };
 }
 
+const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 256;
+
+const captionKinds: Record<string, CaptionEvent['kind']> = {
+  'input_audio_buffer.speech_started': 'start',
+  'conversation.item.input_audio_transcription.delta': 'delta',
+  'conversation.item.input_audio_transcription.completed': 'final',
+  'conversation.item.input_audio_transcription.failed': 'failed',
+  'response.output_audio_transcript.delta': 'delta',
+  'response.output_audio_transcript.done': 'final',
+  'response.output_item.added': 'start',
+};
+
 const openai: RealtimeProtocol = {
   dataChannelName: 'oai-events',
   isCredential: (value): value is string => typeof value === 'string' && value.startsWith('ek_'),
@@ -29,28 +42,32 @@ const openai: RealtimeProtocol = {
   context: (itemId, text) => ({ type: 'conversation.item.create', event_id: 'voxa_load_context', item: { id: itemId, type: 'message', role: 'user', content: [{ type: 'input_text', text }] } }),
   turnStyle: (style, eventId) => ({ type: 'session.update', event_id: eventId, session: { type: 'realtime', audio: { input: { turn_detection: { type: 'semantic_vad', eagerness: style === 'thinking' ? 'low' : 'medium', create_response: true, interrupt_response: true } } } } }),
   event: raw => {
-    if (!raw || typeof raw !== 'object') return {};
-    const event = raw as { type?: string; item?: { id?: string }; item_id?: unknown; transcript?: unknown; delta?: unknown; content_index?: unknown; event_id?: unknown; error?: { code?: unknown; event_id?: unknown }; session?: { audio?: { input?: { turn_detection?: { eagerness?: unknown } } } } };
+    if (!raw || typeof raw !== 'object' || !('type' in raw) || typeof raw.type !== 'string') return {};
+    const event = raw as { type: string; item?: { id?: string; role?: string; type?: string }; item_id?: unknown; response_id?: unknown; response?: { id?: unknown; status?: unknown }; transcript?: unknown; delta?: unknown; content_index?: unknown; event_id?: unknown; error?: { code?: unknown; event_id?: unknown }; session?: { audio?: { input?: { turn_detection?: { eagerness?: unknown } } } } };
     const eagerness = event.session?.audio?.input?.turn_detection?.eagerness;
     const styleRejected = event.type === 'error' && typeof event.error?.event_id === 'string' && /^voxa_turn_style_[0-9]{1,5}$/.test(event.error.event_id) ? event.error.event_id : undefined;
-    const captionKinds: Record<string, CaptionEvent['kind']> = {
-      'input_audio_buffer.speech_started': 'start',
-      'conversation.item.input_audio_transcription.delta': 'delta',
-      'conversation.item.input_audio_transcription.completed': 'final',
-      'conversation.item.input_audio_transcription.failed': 'failed',
-    };
-    const kind = captionKinds[event.type || ''];
+
+    const kind = Object.hasOwn(captionKinds, event.type) ? captionKinds[event.type] : undefined;
+    const assistant = event.type.startsWith('response.');
+    const itemId = event.type === 'response.output_item.added' ? event.item?.id : event.item_id;
+    const responseId = validId(event.response_id) ? event.response_id : undefined;
     const index = event.content_index ?? 0;
     const text = kind === 'delta' ? event.delta : event.transcript;
-    const caption: CaptionEvent | undefined = kind && typeof event.item_id === 'string' && event.item_id.length > 0 && event.item_id.length <= 256 && typeof index === 'number' && Number.isInteger(index) && index >= 0 && index <= 16 &&
+    const caption: CaptionEvent | undefined = kind && validId(itemId) && (!assistant || responseId) &&
+      (event.type !== 'response.output_item.added' || (event.item?.role === 'assistant' && event.item.type === 'message')) &&
+      typeof index === 'number' && Number.isInteger(index) && index >= 0 && index <= 16 &&
       ((kind === 'start' || kind === 'failed') || (typeof text === 'string' && text.length <= 32000))
-      ? { kind, itemId: event.item_id, index, ...(typeof text === 'string' ? { text } : {}), ...(typeof event.event_id === 'string' && event.event_id.length <= 256 ? { eventId: event.event_id } : {}) } : undefined;
+      ? { kind, speaker: assistant ? 'assistant' : 'user', itemId, index, ...(responseId ? { responseId } : {}), ...(typeof text === 'string' ? { text } : {}), ...(validId(event.event_id) ? { eventId: event.event_id } : {}) } : undefined;
+    const interruption = event.type === 'output_audio_buffer.cleared' && responseId ? { responseId }
+      : event.type === 'conversation.item.truncated' && validId(event.item_id) ? { itemId: event.item_id }
+        : event.type === 'response.done' && ['cancelled', 'incomplete', 'failed'].includes(String(event.response?.status)) && validId(event.response?.id) ? { responseId: event.response.id }
+          : undefined;
     return {
-      caption,
+      caption, interruption,
       ...(event.type === 'conversation.item.done' ? { contextItemId: event.item?.id } : {}),
       ...(event.type === 'input_audio_buffer.speech_started' ? { inputActive: true } : {}),
       ...(['input_audio_buffer.speech_stopped', 'input_audio_buffer.committed'].includes(event.type || '') ? { inputActive: false } : {}),
-      ...(caption?.kind === 'final' ? { userTranscript: { id: caption.itemId, text: caption.text ?? '' } } : {}),
+      ...(caption?.kind === 'final' && caption.speaker === 'user' ? { userTranscript: { id: caption.itemId, text: caption.text ?? '' } } : {}),
       ...(event.type === 'response.created' ? { responseActive: true } : {}),
       ...(event.type === 'response.done' ? { responseActive: false } : {}),
       ...(event.type === 'output_audio_buffer.started' ? { outputActive: true } : {}),

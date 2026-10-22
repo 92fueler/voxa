@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react';
 import { isSummaryPreview, type ContextPreview } from './shared/continuity';
-interface Snapshot { key: string; preview: ContextPreview | null; error: string; settled: boolean }
+class PreviewError extends Error {
+  constructor(message: string, readonly sourceIds: string[]) { super(message); }
+}
+interface Snapshot { key: string; preview: ContextPreview | null; error: string; sourceIds: string[]; settled: boolean }
 
 export function useConversationMemory(active: boolean) {
   const [selected, setSelected] = useState<string[]>([]);
   const [revision, setRevision] = useState(0);
-  const [snapshot, setSnapshot] = useState<Snapshot>({ key: '', preview: null, error: '', settled: false });
+  const [snapshot, setSnapshot] = useState<Snapshot>({ key: '', preview: null, error: '', sourceIds: [], settled: false });
   const key = JSON.stringify([selected, active, revision]);
   const current = snapshot.key === key;
   useEffect(() => {
@@ -19,14 +22,18 @@ export function useConversationMemory(active: boolean) {
         body: JSON.stringify({ ids: selected, summariesOnly: true }),
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]),
       }).then(async response => {
-        const value = await response.json() as ContextPreview & { error?: string };
-        if (!response.ok) throw new Error(value.error || 'Could not load selected summaries.');
+        const value: unknown = await response.json();
+        if (!response.ok) {
+          const problem = value && typeof value === 'object' ? value as { error?: unknown; sourceIds?: unknown } : {};
+          const ids = Array.isArray(problem.sourceIds) ? [...new Set(problem.sourceIds.filter((id): id is string => typeof id === 'string' && selected.includes(id)))] : [];
+          throw new PreviewError(typeof problem.error === 'string' ? problem.error : 'Could not load selected summaries.', ids);
+        }
         if (!isSummaryPreview(value, selected)) throw new Error('Selected summaries are not ready.');
         if (controller.signal.aborted) return;
-        setSnapshot({ key, preview: value, error: '', settled: true });
-        expiry = setTimeout(() => setSnapshot({ key, preview: null, error: 'Selected summaries expired. Retry before Start.', settled: true }), Math.max(0, value.expiresAt - Date.now()));
+        setSnapshot({ key, preview: value, error: '', sourceIds: [], settled: true });
+        expiry = setTimeout(() => setSnapshot({ key, preview: null, error: 'Selected summaries expired. Retry before Start.', sourceIds: [], settled: true }), Math.max(0, value.expiresAt - Date.now()));
       }).catch((problem: unknown) => {
-        if (!controller.signal.aborted) setSnapshot({ key, preview: null, error: problem instanceof Error ? problem.message : 'Could not load selected summaries.', settled: true });
+        if (!controller.signal.aborted) setSnapshot({ key, preview: null, error: problem instanceof Error ? problem.message : 'Could not load selected summaries.', sourceIds: problem instanceof PreviewError ? problem.sourceIds : [], settled: true });
       });
     }, 200);
     return () => { controller.abort(); clearTimeout(timer); clearTimeout(expiry); };
@@ -42,6 +49,7 @@ export function useConversationMemory(active: boolean) {
     selected, preview: !active && current ? snapshot.preview : null,
     loading: !active && selected.length > 0 && !(current && snapshot.settled),
     error: !active && current ? snapshot.error : '',
+    errorSourceIds: !active && current ? snapshot.sourceIds : [],
     select, retry: invalidate, consume: invalidate,
   };
 }

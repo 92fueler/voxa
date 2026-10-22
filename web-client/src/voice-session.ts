@@ -1,3 +1,4 @@
+import { voiceSetupMessage } from './shared/realtime-errors';
 import { isSummaryPreview } from './shared/continuity';
 import { LiveTranscript, type LiveTurn } from './live-transcript';
 import { initialTurnPreference, turnPreference, type TurnPreference, type TurnStyle } from './turn-style';
@@ -218,11 +219,7 @@ export class VoiceSession {
       });
       if (this.attempt !== attempt) return;
       if (!credentialResponse.ok) {
-        const problem = await credentialResponse.json().catch(() => null) as { code?: string } | null;
-        const message = ['HISTORY_UNAVAILABLE', 'SOURCE_UNAVAILABLE', 'NO_CONTEXT'].includes(problem?.code || '') ? 'Saved history is unavailable. Your microphone is off. Try again.' : problem?.code?.startsWith('PREVIEW_') ? 'Saved history changed during setup. Start again.' : problem?.code === 'API_KEY_REQUIRED'
-          ? 'Add the server API key and restart the app to start a voice session.'
-          : 'Could not create a session. Check your connection, API key, billing, and model access.';
-        throw new Error(message);
+        throw new Error(voiceSetupMessage('session', credentialResponse.status, await credentialResponse.json().catch(() => null)));
       }
       const credential = await credentialResponse.json() as { protocol?: unknown; value?: unknown; handle?: unknown; conversationId?: unknown; sessionMaxSeconds?: unknown; context?: { itemId?: unknown; text?: unknown } };
       if (this.attempt !== attempt) return;
@@ -284,6 +281,10 @@ export class VoiceSession {
               }, 80);
             }
           }
+          if (providerEvent.interruption && attempt.captions.interrupt(providerEvent.interruption)) {
+            clearTimeout(attempt.captionTimer); attempt.captionTimer = undefined;
+            this.onTranscript(attempt.captions.snapshot());
+          }
           if (providerEvent.contextItemId === attempt.context?.itemId && attempt.context && providerEvent.contextItemId) { attempt.contextReady = true; ready(); }
           if (providerEvent.inputActive !== undefined) attempt.inputActive = providerEvent.inputActive;
           if (providerEvent.responseActive !== undefined) attempt.responseActive = providerEvent.responseActive;
@@ -340,7 +341,9 @@ export class VoiceSession {
         signal: attempt.abort.signal,
       });
       if (this.attempt !== attempt) return;
-      if (!answer.ok) throw new Error('The voice provider could not connect the voice call. Check model access and try again.');
+      if (!answer.ok) {
+        throw new Error(voiceSetupMessage('call', answer.status, await answer.json().catch(() => null)));
+      }
       const sdp = await answer.text();
       if (this.attempt !== attempt) return;
       await peer.setRemoteDescription({ type: 'answer', sdp });

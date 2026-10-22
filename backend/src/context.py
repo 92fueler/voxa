@@ -15,9 +15,10 @@ class ContextSection(TypedDict):
 
 
 class ContextError(Exception):
-    def __init__(self, code, message):
+    def __init__(self, code, message, source_ids=()):
         super().__init__(message)
         self.code = code
+        self.source_ids = list(source_ids)
 
 
 class ContextPreviews:
@@ -41,12 +42,16 @@ class ContextPreviews:
             c = await self.store.run("get", {"id": item_id})
             if not c or not c["endedAt"] or not c["turns"]:
                 raise ContextError(
-                    "SOURCE_UNAVAILABLE", "A selected conversation is unavailable or still finishing."
+                    "SOURCE_UNAVAILABLE",
+                    "A selected conversation is unavailable or still finishing.",
+                    [item_id],
                 )
             summary = c["summary"]
             if summary and summary["status"] == "failed":
                 raise ContextError(
-                    "SUMMARY_FAILED", "A summary could not be prepared. Use Prepare summary and try again."
+                    "SUMMARY_FAILED",
+                    "A summary could not be prepared. Use Prepare summary and try again.",
+                    [item_id],
                 )
             if (
                 not summary
@@ -54,8 +59,19 @@ class ContextPreviews:
                 or not summary["value"]
                 or summary["sourceRevision"] != c["revision"]
             ):
-                raise ContextError("SUMMARY_PENDING", "Preparing summaries…")
+                raise ContextError("SUMMARY_PENDING", "Preparing summaries…", [item_id])
             conversations.append(c)
+        empty_sources = [
+            c["id"]
+            for c in conversations
+            if not c["summary"]["value"]["points"] and (summaries_only or not eligible_turns(c))
+        ]
+        if empty_sources:
+            raise ContextError(
+                "NO_CONTEXT",
+                "The listed conversations have no usable summary insights. Unselect them to continue.",
+                empty_sources,
+            )
         warnings = list(dict.fromkeys(w for c in conversations for w in c["summary"]["value"]["warnings"]))
         sections: list[ContextSection] = [
             {
@@ -78,6 +94,11 @@ class ContextPreviews:
         def render():
             return intro + json.dumps(
                 {"warnings": warnings, "conversations": sections}, ensure_ascii=False, indent=2
+            )
+
+        if len(render().encode()) > 6000:
+            raise ContextError(
+                "CONTEXT_LIMIT", "These summaries cannot fit together. Select fewer conversations.", ids
             )
 
         def add(target, item, front=False):
@@ -113,12 +134,22 @@ class ContextPreviews:
             while len(render().encode()) > 6000:
                 candidate = next((s for s in reversed(sections) if s["recentTurns"] or s["points"]), None)
                 if candidate is None:
-                    raise ContextError("NO_CONTEXT", "Context could not fit. Select fewer conversations.")
+                    raise ContextError(
+                        "CONTEXT_LIMIT",
+                        "These summaries cannot fit together. Select fewer conversations.",
+                        ids,
+                    )
                 candidate["recentTurns"].pop(0) if candidate["recentTurns"] else candidate["points"].pop()
-        if any(not s["recentTurns"] and not s["points"] for s in sections):
+        excluded = [
+            c["id"]
+            for c, section in zip(conversations, sections)
+            if not section["recentTurns"] and not section["points"]
+        ]
+        if excluded:
             raise ContextError(
-                "NO_CONTEXT",
-                "One selected conversation has no eligible context. Select a different conversation.",
+                "CONTEXT_LIMIT",
+                "The listed summaries could not fit alongside your other selections. Unselect them or select fewer conversations.",
+                excluded,
             )
         token = secrets.token_hex(32)
         preview = {
@@ -168,7 +199,9 @@ class ContextPreviews:
                 ) from None
             if not current or not current["endedAt"] or current["revision"] != source["revision"]:
                 raise ContextError(
-                    "PREVIEW_STALE", "A selected conversation changed or was deleted. Prepare a new preview."
+                    "PREVIEW_STALE",
+                    "A selected conversation changed or was deleted. Prepare a new preview.",
+                    [source["id"]],
                 )
 
     def release(self, token):

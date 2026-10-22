@@ -19,3 +19,8 @@ it.each(['everyday', 'thinking'] as const)('preserves the configured input noise
   expect(Object.keys(update.session.audio.input)).toEqual(['turn_detection']);
   expect(update.session.audio.input.turn_detection).toMatchObject({ type: 'semantic_vad', eagerness: style === 'thinking' ? 'low' : 'medium', interrupt_response: true, create_response: true });
 });
+
+
+it.each([null, [], {}, { type: 123 }, { type: {} }, { type: ['response.done'] }].map(raw => [raw]))('ignores malformed event envelopes without throwing: %j', raw => {
+  expect(realtimeProtocol().event(raw)).toEqual({});
+});

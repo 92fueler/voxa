@@ -56,7 +56,23 @@ class OpenAIProvider:
         except httpx.HTTPError:
             raise ProviderError() from None
         if not response.is_success:
-            raise ProviderError("PROVIDER_REJECTED")
+            # Only known error categories leave the adapter, never raw provider bodies.
+            try:
+                problem = response.json()
+                detail = problem.get("error") if isinstance(problem, dict) else None
+                code = detail.get("code") if isinstance(detail, dict) else None
+            except ValueError:
+                code = None
+            category = "PROVIDER_REJECTED"
+            if response.status_code in (401, 403):
+                category = "PROVIDER_AUTH_FAILED"
+            elif code in ("insufficient_quota", "billing_hard_limit_reached"):
+                category = "PROVIDER_QUOTA_EXCEEDED"
+            elif response.status_code == 429:
+                category = "PROVIDER_RATE_LIMITED"
+            elif code == "model_not_found":
+                category = "PROVIDER_MODEL_UNAVAILABLE"
+            raise ProviderError(category, upstream_status=response.status_code) from None
         return response
 
     async def create_session(self, save, instructions, microphone="laptop"):
