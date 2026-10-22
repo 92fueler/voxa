@@ -1,6 +1,16 @@
 name: Infrastructure scaffold checks
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "compose*.yaml"
+      - ".dockerignore"
+      - ".env.example"
+      - "infrastructure/**"
+      - "backend/**"
+      - "web-client/**"
+      - ".github/workflows/infrastructure.yml"
   pull_request:
     paths:
       - "compose*.yaml"

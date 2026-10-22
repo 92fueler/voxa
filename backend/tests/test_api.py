@@ -125,9 +125,13 @@ async def test_saved_handle_single_use_and_late_final_turn(system):
             "transcript": "Final synthetic words 你好",
         }
     )
-    await asyncio.sleep(0.1)
-    status = (await client.post("/api/capture/status", json={"handle": handle})).json()
-    assert status["ended"] and status["pending"] == 0 and status["state"] == "saved"
+    # Wait for asynchronous storage, not a machine-dependent 100ms delay.
+    async with asyncio.timeout(2):
+        while True:
+            status = (await client.post("/api/capture/status", json={"handle": handle})).json()
+            if status["ended"] and status["pending"] == 0 and status["state"] == "saved":
+                break
+            await asyncio.sleep(0.01)
     source = (await client.get(f"/api/conversations/{item_id}")).json()
     assert source["turns"][0]["text"] == "Final synthetic words 你好"
     assert source["summary"]["status"] == "pending"

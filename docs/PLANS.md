@@ -867,3 +867,8 @@ This is a lightweight project convention, not a file structure Codex requires au
 - **Remaining:** packaging/image build on the precise commit is checked at handoff. Actual age/cloud upload, backup identity/renewal/retention/alerts, authoritative DNS, host mount/reboot/systemd, public TLS/authentication and live voice acceptance remain unperformed. iOS was unchanged and not rerun in this bounded task. The existing single-owner Basic-auth limitations remain documented. No additional optional hardening or framework migration was introduced.
 
 - **Packaging correction:** the Mac Docker multi-platform image store selected its native ARM variant during unqualified inspection despite amd64 being preloaded. Release image inspection/export now explicitly selects linux/amd64; require Docker Engine 28+ for these options. No application behavior changed.
+
+### October 22, 2026 — Main CI timing correction
+
+- Main release e090df11e95d76db66f714ecfe6b40219ec16579 has the exact tested local tree b0e568b9c2e82308e29f35641a868c8e01fe0631. Publishing used the authorized 92fueler connector with non-force expected-head protection after existing SSH lacked write access; no local credential changes.
+- Check run 39734318944 passed its real PostgreSQL job but exposed a pre-existing fixed-100ms wait in the late-final-transcript test: capture had ended while three asynchronous writes remained pending. Replaced the delay with a two-second deadline polling the same ended/empty-queue/saved state, preserving transcript/summary/observer-close/deletion assertions. No runtime behavior changed. Infrastructure checks now also trigger on relevant main pushes, rather than PR/manual runs only.
